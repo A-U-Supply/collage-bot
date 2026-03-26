@@ -1,5 +1,6 @@
 slack-sdk>=3.0
+tomli>=2.0; python_version < "3.11"
 requests>=2.28
 Pillow>=9.0
-simple-lama-inpainting>=0.1.2
+simple-lama-inpainting>=0.1.0
 numpy>=1.21,<2

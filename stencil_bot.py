@@ -3,7 +3,10 @@ import argparse
 import logging
 import os
 import sys
-import tomllib
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib  # type: ignore
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
