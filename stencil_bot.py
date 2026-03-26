@@ -57,23 +57,21 @@ def main():
     logger.info(f"Fetching 3 images from #{args.channel}...")
     source_paths = fetch_random_images(token, args.channel, 3, source_dir)
 
-    img1 = Image.open(source_paths[0]).convert("RGB")
-    img2 = Image.open(source_paths[1]).convert("RGB")
-    img3 = Image.open(source_paths[2]).convert("RGB")
+    images = [Image.open(p).convert("RGB") for p in source_paths]
 
-    logger.info("Building stencil from image 1...")
-    mask = make_stencil(img1)
-
-    logger.info("Compositing images 2 and 3 using stencil...")
-    result = apply_stencil(mask, img2, img3)
-
-    dest = out_dir / "stencil_result.png"
-    result.save(dest)
-    logger.info(f"Saved {dest.name}")
+    output_paths = []
+    for i, (s, a, b) in enumerate([(0, 1, 2), (1, 0, 2), (2, 0, 1)]):
+        logger.info(f"Version {i + 1}: image {s + 1} as stencil...")
+        mask = make_stencil(images[s])
+        result = apply_stencil(mask, images[a], images[b])
+        dest = out_dir / f"stencil_result_{i + 1}.png"
+        result.save(dest)
+        logger.info(f"Saved {dest.name}")
+        output_paths.append(dest)
 
     if not args.no_post:
-        post_collages(token, args.channel, [dest], bot_name="collage-stencil-bot")
-        logger.info(f"Posted result to #{args.channel}")
+        post_collages(token, args.channel, output_paths, bot_name="collage-stencil-bot")
+        logger.info(f"Posted {len(output_paths)} results to #{args.channel}")
     else:
         logger.info(f"Saved to {out_dir} (--no-post)")
 
