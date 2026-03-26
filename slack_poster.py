@@ -9,26 +9,38 @@ from slack_fetcher import find_channel_id
 logger = logging.getLogger(__name__)
 
 
-def post_collages(token: str, channel: str, image_paths: list[Path], bot_name: str = "collage-bot") -> None:
+def post_collages(token: str, channel: str, image_paths: list[Path], bot_name: str = "collage-bot", threaded: bool = True) -> None:
     client = WebClient(token=token)
     channel_name = channel.lstrip("#")
     channel_id = find_channel_id(client, channel_name)
     if not channel_id:
         raise ValueError(f"Channel #{channel_name} not found")
 
-    msg = client.chat_postMessage(channel=channel_id, text=f":scissors: *{bot_name}*")
-    thread_ts = msg["ts"]
-
-    for i, path in enumerate(image_paths):
+    if threaded:
+        msg = client.chat_postMessage(channel=channel_id, text=f":scissors: *{bot_name}*")
+        thread_ts = msg["ts"]
+        for i, path in enumerate(image_paths):
+            _upload_with_retry(
+                client,
+                channel=channel_id,
+                file=str(path),
+                filename=path.name,
+                title=f"collage {i + 1}",
+                thread_ts=thread_ts,
+            )
+            logger.info(f"Uploaded {path.name}")
+    else:
+        file_uploads = [
+            {"file": str(path), "filename": path.name, "title": f"collage {i + 1}"}
+            for i, path in enumerate(image_paths)
+        ]
         _upload_with_retry(
             client,
             channel=channel_id,
-            file=str(path),
-            filename=path.name,
-            title=f"collage {i + 1}",
-            thread_ts=thread_ts,
+            file_uploads=file_uploads,
+            initial_comment=f":scissors: *{bot_name}*",
         )
-        logger.info(f"Uploaded {path.name}")
+        logger.info(f"Uploaded {len(image_paths)} images as single message")
 
 
 def _upload_with_retry(client: WebClient, max_retries: int = 3, **kwargs) -> dict:
