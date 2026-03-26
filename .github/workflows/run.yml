@@ -1,0 +1,42 @@
+name: Run Collage Bot
+
+on:
+  schedule:
+    - cron: '0 9 * * *'  # 9am UTC daily
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: 'Slack channel'
+        default: 'image-gen'
+      num_images:
+        description: 'Number of source images'
+        default: '4'
+      split:
+        description: 'Transform split ratio (0.0–0.5)'
+        default: '0.25'
+      blend_width:
+        description: 'Seam blend width (px)'
+        default: '70'
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run collage bot
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          python bot.py \
+            --channel "${{ inputs.channel || 'image-gen' }}" \
+            --num-images "${{ inputs.num_images || '4' }}" \
+            --split "${{ inputs.split || '0.25' }}" \
+            --blend-width "${{ inputs.blend_width || '70' }}"

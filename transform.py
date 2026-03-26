@@ -64,14 +64,14 @@ def make_composites(source_images: list) -> list:
     return composites
 
 
-def apply_transform(img: Image.Image) -> Image.Image:
+def apply_transform(img: Image.Image, split: float = 0.25) -> Image.Image:
     """
-    3x3 cut at 1/4 and 3/4 on both axes.
+    3x3 cut at `split` and `1-split` on both axes.
     Swap left/right outer columns, swap top/bottom outer rows.
     """
     w, h = img.size
-    x1, x2 = w // 4, 3 * w // 4
-    y1, y2 = h // 4, 3 * h // 4
+    x1, x2 = int(w * split), int(w * (1 - split))
+    y1, y2 = int(h * split), int(h * (1 - split))
 
     def crop(left, upper, right, lower):
         return img.crop((left, upper, right, lower))
@@ -105,13 +105,10 @@ def apply_transform(img: Image.Image) -> Image.Image:
     return out
 
 
-def blend_seams(img: Image.Image, strip_width: int = 30) -> Image.Image:
+def blend_seams(img: Image.Image, strip_width: int = 30, split: float = 0.25) -> Image.Image:
     """
-    Remove a 30px strip along every seam and inpaint with LaMa.
-
-    Seams in the final image:
-      Vertical:   x = w/4, w/2, 3w/4
-      Horizontal: y = h/4, h/2, 3h/4
+    Remove a strip along every seam and inpaint with LaMa.
+    Seam positions are derived from `split` to match apply_transform.
     """
     from simple_lama_inpainting import SimpleLama
 
@@ -121,11 +118,11 @@ def blend_seams(img: Image.Image, strip_width: int = 30) -> Image.Image:
     mask = Image.new("L", (w, h), 0)
     mask_arr = np.zeros((h, w), dtype=np.uint8)
 
-    for x in [w // 4, w // 2, 3 * w // 4]:
+    for x in [int(w * split), w // 2, int(w * (1 - split))]:
         x0, x1 = max(0, x - half), min(w, x + half)
         mask_arr[:, x0:x1] = 255
 
-    for y in [h // 4, h // 2, 3 * h // 4]:
+    for y in [int(h * split), h // 2, int(h * (1 - split))]:
         y0, y1 = max(0, y - half), min(h, y + half)
         mask_arr[y0:y1, :] = 255
 
