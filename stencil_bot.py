@@ -27,7 +27,8 @@ def build_parser(cfg: dict) -> argparse.ArgumentParser:
     stencil = cfg.get("stencil", {})
 
     parser = argparse.ArgumentParser(description="Collage stencil bot")
-    parser.add_argument("--channel", default=stencil.get("channel", "image-gen"))
+    parser.add_argument("--source-channel", default=stencil.get("source_channel", "image-gen"))
+    parser.add_argument("--post-channel", default=stencil.get("post_channel", "collage-repository"))
     parser.add_argument("--output-dir", type=Path, default=stencil.get("output_dir", "./collage-stencil-bot-output"))
     parser.add_argument("--no-post", action="store_true")
     return parser
@@ -54,8 +55,8 @@ def main():
     out_dir = output_dir / "output"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"Fetching 3 images from #{args.channel}...")
-    source_paths = fetch_random_images(token, args.channel, 3, source_dir)
+    logger.info(f"Fetching 3 images from #{args.source_channel}...")
+    source_paths = fetch_random_images(token, args.source_channel, 3, source_dir)
 
     images = [Image.open(p).convert("RGB") for p in source_paths]
 
@@ -70,8 +71,8 @@ def main():
         output_paths.append(dest)
 
     if not args.no_post:
-        post_collages(token, args.channel, output_paths, bot_name="collage-stencil-bot")
-        logger.info(f"Posted {len(output_paths)} results to #{args.channel}")
+        post_collages(token, args.post_channel, output_paths, bot_name="collage-stencil-bot")
+        logger.info(f"Posted {len(output_paths)} results to #{args.post_channel}")
     else:
         logger.info(f"Saved to {out_dir} (--no-post)")
 

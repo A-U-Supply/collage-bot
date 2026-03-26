@@ -1,5 +1,6 @@
 [slack]
-channel = "image-gen"
+source_channel = "image-gen"
+post_channel = "collage-repository"
 
 [collage]
 num_images = 4
@@ -10,5 +11,6 @@ split = 0.25       # where to cut (0.0–0.5); 0.25 = quarter/three-quarter
 blend_width = 70   # seam inpaint strip width in pixels
 
 [stencil]
-channel = "image-gen"
+source_channel = "image-gen"
+post_channel = "collage-repository"
 output_dir = "./collage-stencil-bot-output"

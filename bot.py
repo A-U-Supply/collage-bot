@@ -29,7 +29,8 @@ def build_parser(cfg: dict) -> argparse.ArgumentParser:
     transform = cfg.get("transform", {})
 
     parser = argparse.ArgumentParser(description="Collage bot")
-    parser.add_argument("--channel", default=slack.get("channel", "image-gen"))
+    parser.add_argument("--source-channel", default=slack.get("source_channel", "image-gen"))
+    parser.add_argument("--post-channel", default=slack.get("post_channel", "collage-repository"))
     parser.add_argument("--num-images", type=int, default=collage.get("num_images", 4))
     parser.add_argument("--output-dir", type=Path, default=collage.get("output_dir", "./collage-bot-output"))
     parser.add_argument("--split", type=float, default=transform.get("split", 0.25))
@@ -59,8 +60,8 @@ def main():
     out_dir = output_dir / "output"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"Fetching {args.num_images} images from #{args.channel}...")
-    source_paths = fetch_random_images(token, args.channel, args.num_images, source_dir)
+    logger.info(f"Fetching {args.num_images} images from #{args.source_channel}...")
+    source_paths = fetch_random_images(token, args.source_channel, args.num_images, source_dir)
 
     logger.info("Building composites from quadrants...")
     source_images = [Image.open(p).convert("RGB") for p in source_paths]
@@ -76,8 +77,8 @@ def main():
         output_paths.append(dest)
 
     if not args.no_post:
-        post_collages(token, args.channel, output_paths)
-        logger.info(f"Posted {len(output_paths)} collages to #{args.channel}")
+        post_collages(token, args.post_channel, output_paths)
+        logger.info(f"Posted {len(output_paths)} collages to #{args.post_channel}")
     else:
         logger.info(f"Saved to {out_dir} (--no-post)")
 
