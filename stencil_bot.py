@@ -61,7 +61,7 @@ def main():
     images = [Image.open(p).convert("RGB") for p in source_paths]
 
     output_paths = []
-    for i, (s, a, b) in enumerate([(0, 1, 2), (1, 0, 2), (2, 0, 1)]):
+    for i, (s, a, b) in enumerate([(0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)]):
         logger.info(f"Version {i + 1}: image {s + 1} as stencil...")
         mask = make_stencil(images[s])
         result = apply_stencil(mask, images[a], images[b])
