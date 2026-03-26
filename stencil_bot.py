@@ -72,7 +72,7 @@ def main():
     logger.info(f"Saved {dest.name}")
 
     if not args.no_post:
-        post_collages(token, args.channel, [dest])
+        post_collages(token, args.channel, [dest], bot_name="collage-stencil-bot")
         logger.info(f"Posted result to #{args.channel}")
     else:
         logger.info(f"Saved to {out_dir} (--no-post)")
