@@ -1,6 +1,6 @@
 [slack]
 source_channel = "image-gen"
-post_channel = "collage-repository"
+post_channel = "img-junkyard"
 
 [collage]
 num_images = 4
@@ -12,5 +12,5 @@ blend_width = 70   # seam inpaint strip width in pixels
 
 [stencil]
 source_channel = "image-gen"
-post_channel = "collage-repository"
+post_channel = "img-junkyard"
 output_dir = "./collage-stencil-bot-output"
