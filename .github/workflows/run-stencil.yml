@@ -10,7 +10,7 @@ on:
         default: 'image-gen'
       post_channel:
         description: 'Channel to post results to'
-        default: 'collage-repository'
+        default: 'img-junkyard'
 
 jobs:
   run:
@@ -31,4 +31,4 @@ jobs:
         run: |
           python stencil_bot.py \
             --source-channel "${{ inputs.source_channel || 'image-gen' }}" \
-            --post-channel "${{ inputs.post_channel || 'collage-repository' }}"
+            --post-channel "${{ inputs.post_channel || 'img-junkyard' }}"

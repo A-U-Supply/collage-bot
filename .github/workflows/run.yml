@@ -10,7 +10,7 @@ on:
         default: 'image-gen'
       post_channel:
         description: 'Channel to post results to'
-        default: 'collage-repository'
+        default: 'img-junkyard'
       num_images:
         description: 'Number of source images'
         default: '4'
@@ -40,7 +40,7 @@ jobs:
         run: |
           python bot.py \
             --source-channel "${{ inputs.source_channel || 'image-gen' }}" \
-            --post-channel "${{ inputs.post_channel || 'collage-repository' }}" \
+            --post-channel "${{ inputs.post_channel || 'img-junkyard' }}" \
             --num-images "${{ inputs.num_images || '4' }}" \
             --split "${{ inputs.split || '0.25' }}" \
             --blend-width "${{ inputs.blend_width || '70' }}"
