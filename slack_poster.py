@@ -9,7 +9,8 @@ from slack_fetcher import find_channel_id
 logger = logging.getLogger(__name__)
 
 
-def post_collages(token: str, channel: str, image_paths: list[Path], bot_name: str = "collage-bot", threaded: bool = True) -> None:
+def post_collages(token: str, channel: str, image_paths: list[Path], bot_name: str = "collage-bot", threaded: bool = True) -> str:
+    """Post collage images to Slack. Returns the parent message timestamp."""
     client = WebClient(token=token)
     channel_name = channel.lstrip("#")
     channel_id = find_channel_id(client, channel_name)
@@ -29,6 +30,7 @@ def post_collages(token: str, channel: str, image_paths: list[Path], bot_name: s
                 thread_ts=thread_ts,
             )
             logger.info(f"Uploaded {path.name}")
+        return thread_ts
     else:
         file_uploads = [
             {"file": str(path), "filename": path.name, "title": f"collage {i + 1}"}
@@ -41,6 +43,7 @@ def post_collages(token: str, channel: str, image_paths: list[Path], bot_name: s
             initial_comment=f":scissors: *{bot_name}*",
         )
         logger.info(f"Uploaded {len(image_paths)} images as single message")
+        return ""
 
 
 def _upload_with_retry(client: WebClient, max_retries: int = 3, **kwargs) -> dict:
