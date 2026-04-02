@@ -70,9 +70,17 @@ def main():
         logger.info(f"Saved {dest.name}")
         output_paths.append(dest)
 
+    from gif_bot import make_gif
+    gif_path = out_dir / "collage_stencil.gif"
+    frame_duration = int(cfg.get("stencil", {}).get("frame_duration", 100))
+    logger.info(f"Creating GIF at {frame_duration}ms/frame...")
+    make_gif(output_paths, gif_path, frame_duration_ms=frame_duration)
+
+    post_paths = output_paths + [gif_path]
+
     if not args.no_post:
-        message_ts = post_collages(token, args.post_channel, output_paths, bot_name="collage-stencil-bot", threaded=False)
-        logger.info(f"Posted {len(output_paths)} results to #{args.post_channel}")
+        message_ts = post_collages(token, args.post_channel, post_paths, bot_name="collage-stencil-bot", threaded=False)
+        logger.info(f"Posted {len(post_paths)} files to #{args.post_channel}")
         print(f"MESSAGE_TS={message_ts}")
     else:
         logger.info(f"Saved to {out_dir} (--no-post)")

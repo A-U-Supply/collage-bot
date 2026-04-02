@@ -11,9 +11,6 @@ on:
       post_channel:
         description: 'Channel to post results to'
         default: 'img-junkyard'
-      frame_duration:
-        description: 'GIF frame duration in ms'
-        default: '100'
 
 jobs:
   stencil:
@@ -29,22 +26,9 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run collage stencil bot
-        id: run
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
         run: |
-          output=$(python stencil_bot.py \
+          python stencil_bot.py \
             --source-channel "${{ inputs.source_channel || 'image-gen' }}" \
-            --post-channel "${{ inputs.post_channel || 'img-junkyard' }}")
-          echo "$output"
-          ts=$(echo "$output" | grep "^MESSAGE_TS=" | cut -d= -f2)
-          echo "message_ts=$ts" >> $GITHUB_OUTPUT
-
-      - name: Run GIF bot
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-        run: |
-          python gif_bot.py \
-            --channel "${{ inputs.post_channel || 'img-junkyard' }}" \
-            --message-ts "${{ steps.run.outputs.message_ts }}" \
-            --frame-duration "${{ inputs.frame_duration || '100' }}"
+            --post-channel "${{ inputs.post_channel || 'img-junkyard' }}"
