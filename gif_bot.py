@@ -105,14 +105,24 @@ def main():
 
     if not args.no_post:
         logger.info(f"Posting GIF as thread reply to #{channel_name}...")
-        client.files_upload_v2(
+        # Upload to thread
+        resp = client.files_upload_v2(
             channel=channel_id,
             file=str(gif_path),
             filename="collage_stencil.gif",
             title="collage stencil GIF",
             thread_ts=args.message_ts,
-            reply_broadcast=True,
             initial_comment=":scissors: *collage-stencil-gif-bot*",
+        )
+        # Broadcast to channel — files_upload_v2 doesn't support reply_broadcast
+        # so we post a separate message in the thread with broadcast enabled
+        file_info = resp.get("file") or (resp.get("files") or [{}])[0]
+        permalink = file_info.get("permalink", "")
+        client.chat_postMessage(
+            channel=channel_id,
+            thread_ts=args.message_ts,
+            reply_broadcast=True,
+            text=f":scissors: *collage-stencil-gif-bot* — <{permalink}|view GIF>",
         )
         logger.info("Done!")
     else:
