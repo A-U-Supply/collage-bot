@@ -27,13 +27,36 @@ def fetch_source_images(client: WebClient, token: str, channel_id: str, thread_t
     if not messages:
         return []
 
+    msg = messages[0]
     images = []
-    for f in messages[0].get("files", []):
+    seen_ids: set[str] = set()
+
+    # Check files array
+    for f in msg.get("files", []):
+        fid = f.get("id", "")
         mimetype = f.get("mimetype", "")
+        if fid in seen_ids:
+            continue
         if any(mimetype.startswith(p) for p in SOURCE_MIME_PREFIXES):
             url = f.get("url_private_download") or f.get("url_private")
             if url:
+                seen_ids.add(fid)
                 images.append({"url": url, "ext": f.get("filetype", "png")})
+
+    # Also check blocks — multi-file uploads put extra files here
+    for block in msg.get("blocks", []):
+        if block.get("type") != "file":
+            continue
+        file_id = block.get("file_id") or (block.get("file") or {}).get("id")
+        if not file_id or file_id in seen_ids:
+            continue
+        info = client.files_info(file=file_id).get("file", {})
+        mimetype = info.get("mimetype", "")
+        if any(mimetype.startswith(p) for p in SOURCE_MIME_PREFIXES):
+            url = info.get("url_private_download") or info.get("url_private")
+            if url:
+                seen_ids.add(file_id)
+                images.append({"url": url, "ext": info.get("filetype", "png")})
 
     download_dir.mkdir(parents=True, exist_ok=True)
     paths = []

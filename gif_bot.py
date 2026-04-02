@@ -22,6 +22,7 @@ IMAGE_MIME_PREFIXES = ("image/jpeg", "image/png", "image/gif", "image/webp")
 def fetch_thread_images(client: WebClient, token: str, channel_id: str, thread_ts: str, download_dir: Path) -> list[Path]:
     """Fetch all images from a thread in posting order."""
     images = []
+    seen_ids: set[str] = set()
     cursor = None
     while True:
         kwargs = {"channel": channel_id, "ts": thread_ts, "limit": 200}
@@ -29,12 +30,31 @@ def fetch_thread_images(client: WebClient, token: str, channel_id: str, thread_t
             kwargs["cursor"] = cursor
         resp = client.conversations_replies(**kwargs)
         for msg in resp.get("messages", []):
+            # Check files array
             for f in msg.get("files", []):
+                fid = f.get("id", "")
                 mimetype = f.get("mimetype", "")
+                if fid in seen_ids:
+                    continue
                 if any(mimetype.startswith(p) for p in IMAGE_MIME_PREFIXES):
                     url = f.get("url_private_download") or f.get("url_private")
                     if url:
+                        seen_ids.add(fid)
                         images.append({"url": url, "ext": f.get("filetype", "jpg")})
+            # Also check blocks — multi-file uploads put extra files here
+            for block in msg.get("blocks", []):
+                if block.get("type") != "file":
+                    continue
+                file_id = block.get("file_id") or (block.get("file") or {}).get("id")
+                if not file_id or file_id in seen_ids:
+                    continue
+                info = client.files_info(file=file_id).get("file", {})
+                mimetype = info.get("mimetype", "")
+                if any(mimetype.startswith(p) for p in IMAGE_MIME_PREFIXES):
+                    url = info.get("url_private_download") or info.get("url_private")
+                    if url:
+                        seen_ids.add(file_id)
+                        images.append({"url": url, "ext": info.get("filetype", "jpg")})
         cursor = resp.get("response_metadata", {}).get("next_cursor")
         if not cursor:
             break
