@@ -73,7 +73,7 @@ def main():
     parser = argparse.ArgumentParser(description="Collage stencil GIF bot")
     parser.add_argument("--channel", default="img-junkyard")
     parser.add_argument("--message-ts", required=True, help="Timestamp of the stencil bot post")
-    parser.add_argument("--frame-duration", type=int, default=300, help="Frame duration in ms")
+    parser.add_argument("--frame-duration", type=int, default=100, help="Frame duration in ms")
     parser.add_argument("--output-dir", type=Path, default=Path("./collage-stencil-gif-output"))
     parser.add_argument("--no-post", action="store_true")
     args = parser.parse_args()

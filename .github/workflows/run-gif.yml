@@ -11,7 +11,7 @@ on:
         default: 'img-junkyard'
       frame_duration:
         description: 'Frame duration in ms'
-        default: '300'
+        default: '100'
 
 jobs:
   run:
