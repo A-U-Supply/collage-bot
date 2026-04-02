@@ -36,15 +36,23 @@ def post_collages(token: str, channel: str, image_paths: list[Path], bot_name: s
             {"file": str(path), "filename": path.name, "title": f"collage {i + 1}"}
             for i, path in enumerate(image_paths)
         ]
-        _upload_with_retry(
+        resp = _upload_with_retry(
             client,
             channel=channel_id,
             file_uploads=file_uploads,
             initial_comment=f":scissors: *{bot_name}*",
         )
         logger.info(f"Uploaded {len(image_paths)} images as single message")
-        resp = client.conversations_history(channel=channel_id, limit=1)
-        return resp["messages"][0]["ts"]
+        # Extract message ts from file share info
+        files = resp.get("files") or [resp.get("file", {})]
+        for f in files:
+            for visibility in ("public", "private"):
+                for ch_id, msgs in f.get("shares", {}).get(visibility, {}).items():
+                    if ch_id == channel_id and msgs:
+                        return msgs[0]["ts"]
+        # Fallback if shares not available
+        hist = client.conversations_history(channel=channel_id, limit=1)
+        return hist["messages"][0]["ts"]
 
 
 def _upload_with_retry(client: WebClient, max_retries: int = 3, **kwargs) -> dict:
