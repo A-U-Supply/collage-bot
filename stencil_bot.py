@@ -71,7 +71,7 @@ def main():
         output_paths.append(dest)
 
     if not args.no_post:
-        message_ts = post_collages(token, args.post_channel, output_paths, bot_name="collage-stencil-bot", threaded=True)
+        message_ts = post_collages(token, args.post_channel, output_paths, bot_name="collage-stencil-bot", threaded=False)
         logger.info(f"Posted {len(output_paths)} results to #{args.post_channel}")
         print(f"MESSAGE_TS={message_ts}")
     else:

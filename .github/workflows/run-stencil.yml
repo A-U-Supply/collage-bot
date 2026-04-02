@@ -39,24 +39,21 @@ jobs:
           ts=$(echo "$output" | grep "^MESSAGE_TS=" | cut -d= -f2)
           echo "message_ts=$ts" >> $GITHUB_OUTPUT
 
-  gif:
+  trigger-gif:
     needs: stencil
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
+      - name: Trigger GIF bot
+        uses: actions/github-script@v7
         with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run collage stencil GIF bot
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-        run: |
-          python gif_bot.py \
-            --channel "${{ inputs.post_channel || 'img-junkyard' }}" \
-            --message-ts "${{ needs.stencil.outputs.message_ts }}" \
-            --frame-duration 300
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'run-gif.yml',
+              ref: 'main',
+              inputs: {
+                message_ts: '${{ needs.stencil.outputs.message_ts }}',
+                post_channel: '${{ inputs.post_channel || 'img-junkyard' }}'
+              }
+            })

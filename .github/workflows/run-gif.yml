@@ -1,0 +1,36 @@
+name: Run Collage Stencil GIF Bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      message_ts:
+        description: 'Timestamp of the stencil bot post to reply to'
+        required: true
+      post_channel:
+        description: 'Channel containing the stencil bot post'
+        default: 'img-junkyard'
+      frame_duration:
+        description: 'Frame duration in ms'
+        default: '300'
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run collage stencil GIF bot
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          python gif_bot.py \
+            --channel "${{ inputs.post_channel }}" \
+            --message-ts "${{ inputs.message_ts }}" \
+            --frame-duration "${{ inputs.frame_duration }}"

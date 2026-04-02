@@ -43,7 +43,8 @@ def post_collages(token: str, channel: str, image_paths: list[Path], bot_name: s
             initial_comment=f":scissors: *{bot_name}*",
         )
         logger.info(f"Uploaded {len(image_paths)} images as single message")
-        return ""
+        resp = client.conversations_history(channel=channel_id, limit=1)
+        return resp["messages"][0]["ts"]
 
 
 def _upload_with_retry(client: WebClient, max_retries: int = 3, **kwargs) -> dict:
