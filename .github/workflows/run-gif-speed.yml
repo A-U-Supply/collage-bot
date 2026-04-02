@@ -1,0 +1,32 @@
+name: Run GIF Speed Bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      message_link:
+        description: 'Slack message link to the stencil post'
+        required: true
+      frame_duration:
+        description: 'Frame duration in ms (e.g. 100, 500)'
+        required: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run GIF speed bot
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          python gif_speed_bot.py \
+            --message-link "${{ inputs.message_link }}" \
+            --frame-duration "${{ inputs.frame_duration }}"
