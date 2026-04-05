@@ -47,7 +47,7 @@ def erosion_noise(h: int, w: int, scale: int = 40, iterations: int = 30) -> np.n
     return terrain * 2 - 1  # normalize to [-1, 1]
 
 
-def create_noisy_mask(mask_gray: np.ndarray, width: int = 25) -> np.ndarray:
+def create_noisy_mask(mask_gray: np.ndarray, width: int = 10) -> np.ndarray:
     """Replace the hard stencil edge with perlin-style grain before compositing.
 
     In the edge transition zone the mask value is replaced with fractal noise,
@@ -68,7 +68,7 @@ def create_noisy_mask(mask_gray: np.ndarray, width: int = 25) -> np.ndarray:
     return (np.clip(noisy, 0, 1) * 255).astype(np.uint8)
 
 
-def blend_with_noisy_mask(mask: Image.Image, img_a: Image.Image, img_b: Image.Image, width: int = 25) -> np.ndarray:
+def blend_with_noisy_mask(mask: Image.Image, img_a: Image.Image, img_b: Image.Image, width: int = 10) -> np.ndarray:
     """Composite two images using a soft noisy mask, then add a double hard edge."""
     w, h = mask.size
     img_a = img_a.convert("RGB").resize((w, h), Image.LANCZOS)
@@ -90,11 +90,11 @@ def blend_with_noisy_mask(mask: Image.Image, img_a: Image.Image, img_b: Image.Im
 
     bright_vals = np.clip(240 + grain * 0.3, 220, 255)
     for c in range(3):
-        result[:, :, c] = result[:, :, c] * (1 - bright_edge * 0.7) + bright_vals * (bright_edge * 0.7)
+        result[:, :, c] = result[:, :, c] * (1 - bright_edge * 1.0) + bright_vals * (bright_edge * 1.0)
 
     dark_vals = np.clip(20 + grain * 0.3, 0, 50)
     for c in range(3):
-        result[:, :, c] = result[:, :, c] * (1 - dark_edge * 0.7) + dark_vals * (dark_edge * 0.7)
+        result[:, :, c] = result[:, :, c] * (1 - dark_edge * 1.0) + dark_vals * (dark_edge * 1.0)
 
     return np.clip(result, 0, 255).astype(np.uint8)
 
