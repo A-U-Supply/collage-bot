@@ -25,15 +25,27 @@ logger = logging.getLogger(__name__)
 BOT_NAME = "collage-stencil-quad-bot"
 
 
-def post_batch(client: WebClient, channel_id: str, paths: list[Path], thread_ts: str, comment: str | None = None) -> None:
+def post_batch(client: WebClient, channel_id: str, paths: list[Path], thread_ts: str | None = None, comment: str | None = None) -> None:
     file_uploads = [
         {"file": str(p), "filename": p.name, "title": p.stem}
         for p in paths
     ]
-    kwargs: dict = dict(channel=channel_id, file_uploads=file_uploads, thread_ts=thread_ts)
+    kwargs: dict = dict(channel=channel_id, file_uploads=file_uploads)
+    if thread_ts:
+        kwargs["thread_ts"] = thread_ts
     if comment:
         kwargs["initial_comment"] = comment
     client.files_upload_v2(**kwargs)
+
+
+def get_thread_ts_after(client: WebClient, channel_id: str, after: float) -> str:
+    """Find the ts of the first message with files posted after `after` (Unix time)."""
+    resp = client.conversations_history(channel=channel_id, oldest=str(after), limit=10)
+    for msg in resp.get("messages", []):
+        if msg.get("files") or msg.get("blocks"):
+            return msg["ts"]
+    # Fallback to the most recent message
+    return resp["messages"][0]["ts"]
 
 
 def main():
@@ -101,16 +113,18 @@ def main():
         return
 
     # Post to Slack
-    # Open the thread with a text message so we have a reliable ts
-    msg = client.chat_postMessage(
-        channel=channel_id,
-        text=f":scissors: *{BOT_NAME}* — {len(output_paths)} variations",
-    )
-    thread_ts = msg["ts"]
-
-    # Post all images (variations + masks) in batches of 10
     batches = [all_image_paths[i:i + 10] for i in range(0, len(all_image_paths), 10)]
-    for i, batch in enumerate(batches):
+
+    # First batch: post directly to channel so images are visible without opening thread
+    logger.info(f"Posting batch 1/{len(batches)} ({len(batches[0])} images) to channel...")
+    before = time.time()
+    post_batch(client, channel_id, batches[0], comment=f":scissors: *{BOT_NAME}* — {len(output_paths)} variations")
+    time.sleep(2)
+    thread_ts = get_thread_ts_after(client, channel_id, before)
+    logger.info(f"Thread ts: {thread_ts}")
+
+    # Remaining batches as thread replies
+    for i, batch in enumerate(batches[1:], start=1):
         logger.info(f"Posting batch {i + 1}/{len(batches)} ({len(batch)} images)...")
         post_batch(
             client, channel_id, batch, thread_ts=thread_ts,
