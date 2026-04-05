@@ -145,11 +145,13 @@ def main():
     source_paths = fetch_random_images(token, args.source_channel, 3, source_dir)
     images = [Image.open(p).convert("RGB") for p in source_paths]
 
+    gray_images = [img.convert("L").convert("RGB") for img in images]
+
     output_paths = []
     for i, (s, a, b) in enumerate([(0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)]):
         logger.info(f"Version {i + 1}: image {s + 1} as stencil, {a + 1} and {b + 1} as fill...")
         mask = make_stencil(images[s])
-        composite = apply_stencil(mask, images[a], images[b])
+        composite = apply_stencil(mask, gray_images[a], gray_images[b])
         mask_gray = np.array(mask)
         composite_arr = apply_edge_halation(np.array(composite), mask_gray)
         result = Image.fromarray(composite_arr)
