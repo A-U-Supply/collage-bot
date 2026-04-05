@@ -19,25 +19,29 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 
-def mezzotint_noise(h: int, w: int, scale: int = 40) -> np.ndarray:
-    """Mezzotint-style stochastic dot pattern.
+def halftone_noise(h: int, w: int, frequency: int = 6, angle: float = 45.0) -> np.ndarray:
+    """AM halftone screen pattern at fine grain for a blending illusion.
 
-    Simulates the random burnished dot field of a mezzotint plate:
-    coarse random clusters with fine internal grain texture, no regular grid.
+    Classic newspaper/photo reproduction dot grid rotated to angle degrees.
+    Fine frequency means small dots — at 50% coverage the dots read as a
+    visual blend when re-binarized rather than distinct isolated dots.
+    A small random jitter is added so the screen feels slightly worn/organic.
     Returns values in [-1, 1].
     """
-    # Coarse dot clusters
-    primary = np.random.rand(h, w).astype(np.float32)
-    primary = cv2.GaussianBlur(primary, (0, 0), sigmaX=max(scale / 8, 1.0))
+    angle_rad = np.radians(angle)
+    y, x = np.mgrid[0:h, 0:w].astype(np.float32)
+    xr = x * np.cos(angle_rad) + y * np.sin(angle_rad)
+    yr = -x * np.sin(angle_rad) + y * np.cos(angle_rad)
 
-    # Fine grain within and between dots
-    secondary = np.random.rand(h, w).astype(np.float32)
-    secondary = cv2.GaussianBlur(secondary, (0, 0), sigmaX=max(scale / 20, 1.0))
+    # Cosine dot grid normalized to [0, 1]
+    pattern = (np.cos(2 * np.pi * xr / frequency) *
+               np.cos(2 * np.pi * yr / frequency) + 1) / 2
 
-    result = primary * 0.7 + secondary * 0.3
-    r_min, r_max = result.min(), result.max()
-    result = (result - r_min) / (r_max - r_min + 1e-6)
-    return result * 2 - 1
+    # Slight jitter so the screen isn't perfectly mechanical
+    jitter = np.random.rand(h, w).astype(np.float32) * 0.08
+    pattern = np.clip(pattern + jitter, 0, 1)
+
+    return pattern * 2 - 1
 
 
 def create_noisy_mask(mask_gray: np.ndarray, width: int = 10) -> np.ndarray:
@@ -48,7 +52,7 @@ def create_noisy_mask(mask_gray: np.ndarray, width: int = 10) -> np.ndarray:
     Outside the edge zone the original binary mask is preserved.
     """
     h, w = mask_gray.shape
-    grain = mezzotint_noise(h, w, scale=60)
+    grain = halftone_noise(h, w)
     noise_01 = (grain - grain.min()) / (grain.max() - grain.min() + 1e-6)
 
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (width * 2 + 1, width * 2 + 1))
@@ -80,7 +84,7 @@ def blend_with_noisy_mask(mask: Image.Image, img_a: Image.Image, img_b: Image.Im
     noisy_mask = create_noisy_mask(mask_gray, width=width).astype(np.float32)
 
     # Step 2: bake double edge into the mask
-    grain = mezzotint_noise(mask_gray.shape[0], mask_gray.shape[1], scale=60)
+    grain = halftone_noise(mask_gray.shape[0], mask_gray.shape[1])
     thin_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     bright_edge = cv2.subtract(cv2.dilate(mask_gray, thin_kernel), mask_gray).astype(np.float32) / 255.0
     dark_edge = cv2.subtract(mask_gray, cv2.erode(mask_gray, thin_kernel)).astype(np.float32) / 255.0
