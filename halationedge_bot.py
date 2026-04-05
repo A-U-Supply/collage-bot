@@ -69,33 +69,38 @@ def create_noisy_mask(mask_gray: np.ndarray, width: int = 10) -> np.ndarray:
 
 
 def blend_with_noisy_mask(mask: Image.Image, img_a: Image.Image, img_b: Image.Image, width: int = 10) -> np.ndarray:
-    """Composite two images using a soft noisy mask, then add a double hard edge."""
+    """Composite two images using a stencil mask with all edge effects baked in.
+
+    All boundary processing happens on the mask before fills are applied:
+    1. Erosion noise replaces the hard edge zone with organic grain
+    2. Double edge is baked into the mask (bright band pushes toward fill_a,
+       dark band pushes toward fill_b)
+    3. Fills are composited cleanly using the fully-processed mask
+    """
     w, h = mask.size
     img_a = img_a.convert("RGB").resize((w, h), Image.LANCZOS)
     img_b = img_b.convert("RGB").resize((w, h), Image.LANCZOS)
 
     mask_gray = np.array(mask)
-    noisy_mask = create_noisy_mask(mask_gray, width=width)
-    alpha = noisy_mask.astype(np.float32)[:, :, np.newaxis] / 255.0
 
-    a_arr = np.array(img_a).astype(np.float32)
-    b_arr = np.array(img_b).astype(np.float32)
-    result = a_arr * alpha + b_arr * (1 - alpha)
+    # Step 1: inject erosion noise into the edge transition zone
+    noisy_mask = create_noisy_mask(mask_gray, width=width).astype(np.float32)
 
-    # Double edge: additive bright glow on dark side, subtractive shadow on white side
-    # Additive/subtractive blending keeps fill image visible through the edge effect
+    # Step 2: bake double edge into the mask
     grain = erosion_noise(mask_gray.shape[0], mask_gray.shape[1], scale=60)
     thin_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     bright_edge = cv2.subtract(cv2.dilate(mask_gray, thin_kernel), mask_gray).astype(np.float32) / 255.0
     dark_edge = cv2.subtract(mask_gray, cv2.erode(mask_gray, thin_kernel)).astype(np.float32) / 255.0
 
     edge_grain = np.clip(180 + grain * 35, 120, 230)
-    bright_boost = bright_edge * edge_grain
-    dark_boost = dark_edge * edge_grain
+    noisy_mask = np.clip(noisy_mask + bright_edge * edge_grain, 0, 255)
+    noisy_mask = np.clip(noisy_mask - dark_edge * edge_grain, 0, 255)
 
-    for c in range(3):
-        result[:, :, c] = np.clip(result[:, :, c] + bright_boost, 0, 255)
-        result[:, :, c] = np.clip(result[:, :, c] - dark_boost, 0, 255)
+    # Step 3: composite fills using the fully-processed mask
+    alpha = noisy_mask[:, :, np.newaxis] / 255.0
+    a_arr = np.array(img_a).astype(np.float32)
+    b_arr = np.array(img_b).astype(np.float32)
+    result = a_arr * alpha + b_arr * (1 - alpha)
 
     return np.clip(result, 0, 255).astype(np.uint8)
 
