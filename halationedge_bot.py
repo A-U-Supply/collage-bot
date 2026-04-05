@@ -19,32 +19,25 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 
-def erosion_noise(h: int, w: int, scale: int = 40, iterations: int = 30) -> np.ndarray:
-    """Thermal erosion simulation for organic ridge/valley edge texture.
+def mezzotint_noise(h: int, w: int, scale: int = 40) -> np.ndarray:
+    """Mezzotint-style stochastic dot pattern.
 
-    Material flows from steep slopes to lower neighbors, creating
-    characteristic ridgelines and eroded valleys.
+    Simulates the random burnished dot field of a mezzotint plate:
+    coarse random clusters with fine internal grain texture, no regular grid.
     Returns values in [-1, 1].
     """
-    terrain = np.random.rand(h, w).astype(np.float32)
-    terrain = cv2.GaussianBlur(terrain, (0, 0), sigmaX=max(scale / 3, 1.0))
+    # Coarse dot clusters
+    primary = np.random.rand(h, w).astype(np.float32)
+    primary = cv2.GaussianBlur(primary, (0, 0), sigmaX=max(scale / 8, 1.0))
 
-    talus = 0.03  # max stable slope before material moves
-    rate = 0.4
-    kernel = np.array([[0, 1, 0],
-                       [1, 0, 1],
-                       [0, 1, 0]], dtype=np.float32) / 4
+    # Fine grain within and between dots
+    secondary = np.random.rand(h, w).astype(np.float32)
+    secondary = cv2.GaussianBlur(secondary, (0, 0), sigmaX=max(scale / 20, 1.0))
 
-    for _ in range(iterations):
-        avg = cv2.filter2D(terrain, -1, kernel)
-        diff = terrain - avg
-        erode = np.maximum(diff - talus, 0)
-        terrain -= erode * rate
-        terrain += cv2.filter2D(erode * rate, -1, kernel)
-
-    t_min, t_max = terrain.min(), terrain.max()
-    terrain = (terrain - t_min) / (t_max - t_min + 1e-6)
-    return terrain * 2 - 1  # normalize to [-1, 1]
+    result = primary * 0.7 + secondary * 0.3
+    r_min, r_max = result.min(), result.max()
+    result = (result - r_min) / (r_max - r_min + 1e-6)
+    return result * 2 - 1
 
 
 def create_noisy_mask(mask_gray: np.ndarray, width: int = 10) -> np.ndarray:
@@ -55,7 +48,7 @@ def create_noisy_mask(mask_gray: np.ndarray, width: int = 10) -> np.ndarray:
     Outside the edge zone the original binary mask is preserved.
     """
     h, w = mask_gray.shape
-    grain = erosion_noise(h, w, scale=60)
+    grain = mezzotint_noise(h, w, scale=60)
     noise_01 = (grain - grain.min()) / (grain.max() - grain.min() + 1e-6)
 
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (width * 2 + 1, width * 2 + 1))
@@ -87,7 +80,7 @@ def blend_with_noisy_mask(mask: Image.Image, img_a: Image.Image, img_b: Image.Im
     noisy_mask = create_noisy_mask(mask_gray, width=width).astype(np.float32)
 
     # Step 2: bake double edge into the mask
-    grain = erosion_noise(mask_gray.shape[0], mask_gray.shape[1], scale=60)
+    grain = mezzotint_noise(mask_gray.shape[0], mask_gray.shape[1], scale=60)
     thin_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     bright_edge = cv2.subtract(cv2.dilate(mask_gray, thin_kernel), mask_gray).astype(np.float32) / 255.0
     dark_edge = cv2.subtract(mask_gray, cv2.erode(mask_gray, thin_kernel)).astype(np.float32) / 255.0
