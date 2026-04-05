@@ -68,11 +68,16 @@ def main():
     images = [Image.open(p).convert("RGB") for p in source_paths]
 
     # Generate all 24 variations (4 stencil choices × 3! orderings)
+    # Also save the 3-level mask image for each original
     output_paths = []
+    mask_paths = []
     n = 0
     for stencil_idx in range(4):
         logger.info(f"Generating variations with image {stencil_idx + 1} as stencil...")
         mask = make_3level_stencil(images[stencil_idx])
+        mask_dest = out_dir / f"mask_{stencil_idx:02d}.png"
+        mask.save(mask_dest)
+        mask_paths.append(mask_dest)
         others = [images[i] for i in range(4) if i != stencil_idx]
         for perm in permutations(range(3)):
             ordered = [others[i] for i in perm]
@@ -83,13 +88,16 @@ def main():
             output_paths.append(dest)
             n += 1
 
-    # Create GIF from all 24 outputs
+    # Append mask images after variations, before GIF
+    all_image_paths = output_paths + mask_paths
+
+    # Create GIF from all 24 variation outputs (not masks)
     gif_path = args.output_dir / f"quad_stencil_{args.frame_duration}ms.gif"
     logger.info(f"Creating GIF at {args.frame_duration}ms/frame...")
     make_gif(output_paths, gif_path, frame_duration_ms=args.frame_duration)
 
     if args.no_post:
-        logger.info(f"Saved {len(output_paths)} images + GIF to {args.output_dir} (--no-post)")
+        logger.info(f"Saved {len(all_image_paths)} images + GIF to {args.output_dir} (--no-post)")
         return
 
     # Post to Slack
@@ -100,35 +108,25 @@ def main():
     )
     thread_ts = msg["ts"]
 
-    # Post variations in batches of 10
-    batches = [output_paths[i:i + 10] for i in range(0, len(output_paths), 10)]
+    # Post all images (variations + masks) in batches of 10
+    batches = [all_image_paths[i:i + 10] for i in range(0, len(all_image_paths), 10)]
     for i, batch in enumerate(batches):
         logger.info(f"Posting batch {i + 1}/{len(batches)} ({len(batch)} images)...")
         post_batch(
             client, channel_id, batch, thread_ts=thread_ts,
-            comment=f"Variations {i * 10 + 1}–{i * 10 + len(batch)}",
+            comment=f"Images {i * 10 + 1}–{i * 10 + len(batch)}",
         )
         time.sleep(2)
 
     # Post GIF as final thread reply
     logger.info("Posting GIF...")
-    resp = client.files_upload_v2(
+    client.files_upload_v2(
         channel=channel_id,
         file=str(gif_path),
         filename=gif_path.name,
         title=f"quad stencil GIF @ {args.frame_duration}ms",
         thread_ts=thread_ts,
         initial_comment=f":scissors: GIF ({args.frame_duration}ms/frame)",
-    )
-    file_info = resp.get("file") or (resp.get("files") or [{}])[0]
-    permalink = file_info.get("permalink", "")
-
-    # Broadcast thread to channel
-    client.chat_postMessage(
-        channel=channel_id,
-        thread_ts=thread_ts,
-        reply_broadcast=True,
-        text=f":scissors: *{BOT_NAME}* — <{permalink}|view GIF> ({args.frame_duration}ms/frame)",
     )
 
     logger.info("Done!")
