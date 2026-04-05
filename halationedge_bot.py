@@ -19,21 +19,32 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 
-def fractal_noise(h: int, w: int, scale: int = 60) -> np.ndarray:
-    """Approximate Perlin-style noise via layered gaussian octaves (fBm)."""
-    result = np.zeros((h, w), dtype=np.float32)
-    amplitude = 1.0
-    frequency = 1.0
-    total = 0.0
-    for _ in range(4):
-        layer = np.random.normal(0, 1, (h, w)).astype(np.float32)
-        sigma = max(scale / frequency, 1.0)
-        layer = cv2.GaussianBlur(layer, (0, 0), sigmaX=sigma)
-        result += layer * amplitude
-        total += amplitude
-        amplitude *= 0.5
-        frequency *= 2.0
-    return result / total
+def erosion_noise(h: int, w: int, scale: int = 40, iterations: int = 30) -> np.ndarray:
+    """Thermal erosion simulation for organic ridge/valley edge texture.
+
+    Material flows from steep slopes to lower neighbors, creating
+    characteristic ridgelines and eroded valleys.
+    Returns values in [-1, 1].
+    """
+    terrain = np.random.rand(h, w).astype(np.float32)
+    terrain = cv2.GaussianBlur(terrain, (0, 0), sigmaX=max(scale / 3, 1.0))
+
+    talus = 0.03  # max stable slope before material moves
+    rate = 0.4
+    kernel = np.array([[0, 1, 0],
+                       [1, 0, 1],
+                       [0, 1, 0]], dtype=np.float32) / 4
+
+    for _ in range(iterations):
+        avg = cv2.filter2D(terrain, -1, kernel)
+        diff = terrain - avg
+        erode = np.maximum(diff - talus, 0)
+        terrain -= erode * rate
+        terrain += cv2.filter2D(erode * rate, -1, kernel)
+
+    t_min, t_max = terrain.min(), terrain.max()
+    terrain = (terrain - t_min) / (t_max - t_min + 1e-6)
+    return terrain * 2 - 1  # normalize to [-1, 1]
 
 
 def create_noisy_mask(mask_gray: np.ndarray, width: int = 25) -> np.ndarray:
@@ -44,7 +55,7 @@ def create_noisy_mask(mask_gray: np.ndarray, width: int = 25) -> np.ndarray:
     Outside the edge zone the original binary mask is preserved.
     """
     h, w = mask_gray.shape
-    grain = fractal_noise(h, w, scale=60)
+    grain = erosion_noise(h, w, scale=60)
     noise_01 = (grain - grain.min()) / (grain.max() - grain.min() + 1e-6)
 
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (width * 2 + 1, width * 2 + 1))
@@ -72,7 +83,7 @@ def blend_with_noisy_mask(mask: Image.Image, img_a: Image.Image, img_b: Image.Im
     result = a_arr * alpha + b_arr * (1 - alpha)
 
     # Double edge: thin bright line on dark side, thin dark line on white side
-    grain = fractal_noise(mask_gray.shape[0], mask_gray.shape[1], scale=60) * 35
+    grain = erosion_noise(mask_gray.shape[0], mask_gray.shape[1], scale=60) * 35
     thin_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     bright_edge = cv2.subtract(cv2.dilate(mask_gray, thin_kernel), mask_gray).astype(np.float32) / 255.0
     dark_edge = cv2.subtract(mask_gray, cv2.erode(mask_gray, thin_kernel)).astype(np.float32) / 255.0
