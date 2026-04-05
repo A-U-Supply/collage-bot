@@ -11,7 +11,7 @@ on:
         default: 'img-junkyard'
       frame_duration:
         description: 'GIF frame duration in ms'
-        default: '100'
+        default: '25'
 
 jobs:
   run:

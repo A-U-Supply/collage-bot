@@ -64,14 +64,14 @@ def apply_edge_halation(composite: np.ndarray, mask_gray: np.ndarray, width: int
 
     result = composite.astype(np.float32)
 
-    # Asymmetric bleed: white 48%, dark 32%
+    # Equal bleed: white and dark both at 40%
     white_grain = np.clip(210 + grain, 160, 255)
     for c in range(3):
-        result[:, :, c] = result[:, :, c] * (1 - white_zone * 0.48) + white_grain * (white_zone * 0.48)
+        result[:, :, c] = result[:, :, c] * (1 - white_zone * 0.40) + white_grain * (white_zone * 0.40)
 
     dark_grain = np.clip(40 + grain, 0, 90)
     for c in range(3):
-        result[:, :, c] = result[:, :, c] * (1 - black_zone * 0.32) + dark_grain * (black_zone * 0.32)
+        result[:, :, c] = result[:, :, c] * (1 - black_zone * 0.40) + dark_grain * (black_zone * 0.40)
 
     # Double edge lines
     bright_edge = np.clip(240 + grain * 0.3, 220, 255)
@@ -92,7 +92,7 @@ def main():
     parser.add_argument("--source-channel", default="image-gen")
     parser.add_argument("--post-channel", default="img-junkyard")
     parser.add_argument("--output-dir", type=Path, default=Path("./halationedge-bot-output"))
-    parser.add_argument("--frame-duration", type=int, default=100, help="GIF frame duration in ms")
+    parser.add_argument("--frame-duration", type=int, default=25, help="GIF frame duration in ms")
     parser.add_argument("--no-post", action="store_true")
     args = parser.parse_args()
 
