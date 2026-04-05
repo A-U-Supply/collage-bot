@@ -95,7 +95,7 @@ def main():
     parser.add_argument("--source-channel", default="image-gen")
     parser.add_argument("--post-channel", default="img-junkyard")
     parser.add_argument("--output-dir", type=Path, default=Path("./halationedge-bot-output"))
-    parser.add_argument("--frame-duration", type=int, default=25, help="GIF frame duration in ms")
+    parser.add_argument("--frame-duration", type=int, default=40, help="GIF frame duration in ms")
     parser.add_argument("--no-post", action="store_true")
     args = parser.parse_args()
 
