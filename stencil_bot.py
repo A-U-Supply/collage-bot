@@ -77,7 +77,14 @@ def main():
     gif_order = [0, 3, 1, 4, 2, 5]
     make_gif([output_paths[i] for i in gif_order], gif_path, frame_duration_ms=frame_duration)
 
-    post_paths = output_paths + [gif_path]
+    gif_pair_12 = out_dir / "collage_stencil_pair_12.gif"
+    gif_pair_34 = out_dir / "collage_stencil_pair_34.gif"
+    gif_pair_56 = out_dir / "collage_stencil_pair_56.gif"
+    make_gif([output_paths[0], output_paths[1]], gif_pair_12, frame_duration_ms=frame_duration)
+    make_gif([output_paths[2], output_paths[3]], gif_pair_34, frame_duration_ms=frame_duration)
+    make_gif([output_paths[4], output_paths[5]], gif_pair_56, frame_duration_ms=frame_duration)
+
+    post_paths = output_paths + [gif_path, gif_pair_12, gif_pair_34, gif_pair_56]
 
     if not args.no_post:
         message_ts = post_collages(token, args.post_channel, post_paths, bot_name="collage-stencil-bot", threaded=False)
