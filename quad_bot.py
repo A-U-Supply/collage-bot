@@ -39,13 +39,15 @@ def post_batch(client: WebClient, channel_id: str, paths: list[Path], thread_ts:
 
 
 def get_thread_ts_after(client: WebClient, channel_id: str, after: float) -> str:
-    """Find the ts of the first message with files posted after `after` (Unix time)."""
-    resp = client.conversations_history(channel=channel_id, oldest=str(after), limit=10)
-    for msg in resp.get("messages", []):
-        if msg.get("files") or msg.get("blocks"):
-            return msg["ts"]
-    # Fallback to the most recent message
-    return resp["messages"][0]["ts"]
+    """Find the ts of the most recent message with files posted after `after` (Unix time)."""
+    for attempt in range(5):
+        resp = client.conversations_history(channel=channel_id, limit=10)
+        for msg in resp.get("messages", []):
+            if float(msg["ts"]) >= after and (msg.get("files") or msg.get("blocks")):
+                return msg["ts"]
+        logger.info(f"Upload not visible yet, retrying in 3s (attempt {attempt + 1}/5)...")
+        time.sleep(3)
+    raise RuntimeError("Could not find uploaded message in channel history after 5 attempts")
 
 
 def main():
