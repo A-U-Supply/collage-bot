@@ -96,7 +96,12 @@ def blend_with_noisy_mask(mask: Image.Image, img_a: Image.Image, img_b: Image.Im
     noisy_mask = np.clip(noisy_mask + bright_edge * edge_grain, 0, 255)
     noisy_mask = np.clip(noisy_mask - dark_edge * edge_grain, 0, 255)
 
-    # Step 3: composite fills using the fully-processed mask
+    # Step 3: re-binarize — threshold back to hard 0/255
+    # The erosion noise and double edge shift where the boundary falls,
+    # but the final cut is still hard black/white
+    noisy_mask = np.where(noisy_mask >= 128, 255.0, 0.0)
+
+    # Step 4: composite fills using the fully-processed mask
     alpha = noisy_mask[:, :, np.newaxis] / 255.0
     a_arr = np.array(img_a).astype(np.float32)
     b_arr = np.array(img_b).astype(np.float32)
