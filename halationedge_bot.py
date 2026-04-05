@@ -36,51 +36,54 @@ def fractal_noise(h: int, w: int, scale: int = 60) -> np.ndarray:
     return result / total
 
 
-def apply_edge_halation(composite: np.ndarray, mask_gray: np.ndarray, width: int = 25) -> np.ndarray:
-    """Add edge halation along stencil mask boundaries.
+def create_noisy_mask(mask_gray: np.ndarray, width: int = 25) -> np.ndarray:
+    """Replace the hard stencil edge with perlin-style grain before compositing.
 
-    - Perlin-style (fBm) grain texture
-    - White bleed 48%, dark bleed 32% (white favored by ~20%)
-    - Double edge: thin bright line on dark side, thin dark line on white side
+    In the edge transition zone the mask value is replaced with fractal noise,
+    creating organic grainy blending where the fills meet.
+    Outside the edge zone the original binary mask is preserved.
     """
     h, w = mask_gray.shape
-    grain = fractal_noise(h, w, scale=60) * 35
+    grain = fractal_noise(h, w, scale=60)
+    noise_01 = (grain - grain.min()) / (grain.max() - grain.min() + 1e-6)
 
-    # Wide soft bleed zones
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (width * 2 + 1, width * 2 + 1))
-    dilated = cv2.dilate(mask_gray, kernel)
-    eroded = cv2.erode(mask_gray, kernel)
-    white_bleed = cv2.subtract(dilated, mask_gray)
-    black_bleed = cv2.subtract(mask_gray, eroded)
+    dilated = cv2.dilate(mask_gray, kernel).astype(np.float32) / 255.0
+    eroded = cv2.erode(mask_gray, kernel).astype(np.float32) / 255.0
+    edge_zone = dilated - eroded  # 1 in transition zone, 0 elsewhere
 
-    sigma = width * 0.4
-    white_zone = cv2.GaussianBlur(white_bleed.astype(np.float32), (0, 0), sigmaX=sigma) / 255.0
-    black_zone = cv2.GaussianBlur(black_bleed.astype(np.float32), (0, 0), sigmaX=sigma) / 255.0
+    mask_01 = mask_gray.astype(np.float32) / 255.0
+    noisy = mask_01 * (1 - edge_zone) + noise_01 * edge_zone
+    return (np.clip(noisy, 0, 1) * 255).astype(np.uint8)
 
-    # Double edge: thin hard lines right at the boundary
+
+def blend_with_noisy_mask(mask: Image.Image, img_a: Image.Image, img_b: Image.Image, width: int = 25) -> np.ndarray:
+    """Composite two images using a soft noisy mask, then add a double hard edge."""
+    w, h = mask.size
+    img_a = img_a.convert("RGB").resize((w, h), Image.LANCZOS)
+    img_b = img_b.convert("RGB").resize((w, h), Image.LANCZOS)
+
+    mask_gray = np.array(mask)
+    noisy_mask = create_noisy_mask(mask_gray, width=width)
+    alpha = noisy_mask.astype(np.float32)[:, :, np.newaxis] / 255.0
+
+    a_arr = np.array(img_a).astype(np.float32)
+    b_arr = np.array(img_b).astype(np.float32)
+    result = a_arr * alpha + b_arr * (1 - alpha)
+
+    # Double edge: thin bright line on dark side, thin dark line on white side
+    grain = fractal_noise(mask_gray.shape[0], mask_gray.shape[1], scale=60) * 35
     thin_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    bright_edge_zone = cv2.subtract(cv2.dilate(mask_gray, thin_kernel), mask_gray).astype(np.float32) / 255.0
-    dark_edge_zone = cv2.subtract(mask_gray, cv2.erode(mask_gray, thin_kernel)).astype(np.float32) / 255.0
+    bright_edge = cv2.subtract(cv2.dilate(mask_gray, thin_kernel), mask_gray).astype(np.float32) / 255.0
+    dark_edge = cv2.subtract(mask_gray, cv2.erode(mask_gray, thin_kernel)).astype(np.float32) / 255.0
 
-    result = composite.astype(np.float32)
-
-    # Equal bleed: white and dark both at 40%
-    white_grain = np.clip(210 + grain, 160, 255)
+    bright_vals = np.clip(240 + grain * 0.3, 220, 255)
     for c in range(3):
-        result[:, :, c] = result[:, :, c] * (1 - white_zone * 0.40) + white_grain * (white_zone * 0.40)
+        result[:, :, c] = result[:, :, c] * (1 - bright_edge * 0.7) + bright_vals * (bright_edge * 0.7)
 
-    dark_grain = np.clip(40 + grain, 0, 90)
+    dark_vals = np.clip(20 + grain * 0.3, 0, 50)
     for c in range(3):
-        result[:, :, c] = result[:, :, c] * (1 - black_zone * 0.40) + dark_grain * (black_zone * 0.40)
-
-    # Double edge lines
-    bright_edge = np.clip(240 + grain * 0.3, 220, 255)
-    for c in range(3):
-        result[:, :, c] = result[:, :, c] * (1 - bright_edge_zone * 0.7) + bright_edge * (bright_edge_zone * 0.7)
-
-    dark_edge = np.clip(20 + grain * 0.3, 0, 50)
-    for c in range(3):
-        result[:, :, c] = result[:, :, c] * (1 - dark_edge_zone * 0.7) + dark_edge * (dark_edge_zone * 0.7)
+        result[:, :, c] = result[:, :, c] * (1 - dark_edge * 0.7) + dark_vals * (dark_edge * 0.7)
 
     return np.clip(result, 0, 255).astype(np.uint8)
 
@@ -103,7 +106,7 @@ def main():
 
     from slack_fetcher import fetch_random_images
     from slack_poster import post_collages
-    from stencil_transform import make_stencil, apply_stencil
+    from stencil_transform import make_stencil
     from gif_bot import make_gif
 
     source_dir = args.output_dir / "source"
@@ -118,8 +121,7 @@ def main():
     for i, (s, a, b) in enumerate([(0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)]):
         logger.info(f"Version {i + 1}: image {s + 1} as stencil, {a + 1} and {b + 1} as fill...")
         mask = make_stencil(images[s])
-        composite = apply_stencil(mask, images[a], images[b])
-        composite_arr = apply_edge_halation(np.array(composite), np.array(mask))
+        composite_arr = blend_with_noisy_mask(mask, images[a], images[b])
         result = Image.fromarray(composite_arr)
         dest = out_dir / f"halationedge_result_{i + 1}.png"
         result.save(dest)
