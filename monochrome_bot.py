@@ -1,8 +1,9 @@
 """Collage stencil monochrome bot.
 
-Like collage-stencil-bot but converts the two fill images to high-contrast
-B&W before compositing. The stencil image remains full color for mask
-generation. Posts all 6 variations plus an animated GIF as a single message.
+Like collage-stencil-bot but converts the two fill images to a silver gelatin
+print-style monochrome (grayscale + CLAHE + unsharp mask) before compositing.
+The stencil image remains full color for mask generation.
+Posts all 6 variations plus an animated GIF as a single message.
 """
 import argparse
 import logging
@@ -10,9 +11,28 @@ import os
 import sys
 from pathlib import Path
 
-from PIL import Image
+import cv2
+import numpy as np
+from PIL import Image, ImageFilter
 
 logger = logging.getLogger(__name__)
+
+
+def to_silver_gelatin(img: Image.Image) -> Image.Image:
+    """Convert image to silver gelatin print-style monochrome.
+
+    Steps:
+    1. Grayscale conversion
+    2. CLAHE for rich local contrast (deep blacks, bright highlights)
+    3. Unsharp mask for print-like sharpness
+    Returns an RGB image.
+    """
+    gray = np.array(img.convert("L"))
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    pil = Image.fromarray(enhanced, mode="L")
+    sharpened = pil.filter(ImageFilter.UnsharpMask(radius=1.5, percent=120, threshold=3))
+    return sharpened.convert("RGB")
 
 
 def main():
@@ -44,8 +64,8 @@ def main():
     source_paths = fetch_random_images(token, args.source_channel, 3, source_dir)
     images = [Image.open(p).convert("RGB") for p in source_paths]
 
-    # Pre-compute B&W version of each image for use as fill
-    bw_images = [make_stencil(img).convert("RGB") for img in images]
+    # Pre-compute silver gelatin monochrome version of each image for use as fill
+    bw_images = [to_silver_gelatin(img) for img in images]
 
     output_paths = []
     for i, (s, a, b) in enumerate([(0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)]):
