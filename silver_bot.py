@@ -17,10 +17,10 @@ from PIL import Image, ImageFilter
 
 logger = logging.getLogger(__name__)
 
-# Tonal curve: crushed blacks, rich midtones, bloomed highlights
+# Tonal curve: crushed blacks, rich midtones, pushed highlights toward white
 # Defined as (input, output) points, interpolated across 0-255
-_CURVE_IN  = [  0,  30, 128, 220, 255]
-_CURVE_OUT = [  0,   5, 140, 235, 255]
+_CURVE_IN  = [  0,  30, 128, 210, 255]
+_CURVE_OUT = [  0,   5, 140, 248, 255]
 _LUT = np.interp(np.arange(256), _CURVE_IN, _CURVE_OUT).astype(np.uint8)
 
 
@@ -38,18 +38,23 @@ def to_silver_halation(img: Image.Image) -> Image.Image:
     # Apply tonal curve via LUT
     curved = _LUT[gray]
 
-    # Halation: isolate highlights, apply large gaussian blur
-    highlights = np.where(curved > 200, curved.astype(np.float32), 0.0)
-    halo = cv2.GaussianBlur(highlights, (0, 0), sigmaX=18)
+    # Halation: lower threshold to bloom more of the image, wider blur
+    highlights = np.where(curved > 170, curved.astype(np.float32), 0.0)
+    halo = cv2.GaussianBlur(highlights, (0, 0), sigmaX=26)
 
     # Screen blend: result = 255 - ((255-a)*(255-b)/255)
     a = curved.astype(np.float32)
     result = 255.0 - (255.0 - a) * (255.0 - halo) / 255.0
     result = np.clip(result, 0, 255).astype(np.uint8)
 
-    # Film grain: add gaussian noise
-    grain = np.random.normal(0, 6, result.shape).astype(np.float32)
+    # Film grain: slightly more grain for micro-contrast and texture
+    grain = np.random.normal(0, 9, result.shape).astype(np.float32)
     result = np.clip(result.astype(np.float32) + grain, 0, 255).astype(np.uint8)
+
+    # Unsharp mask to crisp edges against the glow
+    pil_sharp = Image.fromarray(result, mode="L")
+    pil_sharp = pil_sharp.filter(ImageFilter.UnsharpMask(radius=1.2, percent=150, threshold=2))
+    result = np.array(pil_sharp)
 
     # Silver tone: convert to RGB and tint whites with a cool blue-grey
     pil = Image.fromarray(result, mode="L").convert("RGB")
