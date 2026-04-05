@@ -65,7 +65,8 @@ def main():
 
     gif_path = out_dir / f"bw_stencil_{args.frame_duration}ms.gif"
     logger.info(f"Creating GIF at {args.frame_duration}ms/frame...")
-    make_gif(output_paths, gif_path, frame_duration_ms=args.frame_duration)
+    gif_order = [0, 3, 1, 4, 2, 5]
+    make_gif([output_paths[i] for i in gif_order], gif_path, frame_duration_ms=args.frame_duration)
 
     post_paths = output_paths + [gif_path]
 
