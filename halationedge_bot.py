@@ -82,19 +82,20 @@ def blend_with_noisy_mask(mask: Image.Image, img_a: Image.Image, img_b: Image.Im
     b_arr = np.array(img_b).astype(np.float32)
     result = a_arr * alpha + b_arr * (1 - alpha)
 
-    # Double edge: thin bright line on dark side, thin dark line on white side
-    grain = erosion_noise(mask_gray.shape[0], mask_gray.shape[1], scale=60) * 35
+    # Double edge: additive bright glow on dark side, subtractive shadow on white side
+    # Additive/subtractive blending keeps fill image visible through the edge effect
+    grain = erosion_noise(mask_gray.shape[0], mask_gray.shape[1], scale=60)
     thin_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     bright_edge = cv2.subtract(cv2.dilate(mask_gray, thin_kernel), mask_gray).astype(np.float32) / 255.0
     dark_edge = cv2.subtract(mask_gray, cv2.erode(mask_gray, thin_kernel)).astype(np.float32) / 255.0
 
-    bright_vals = np.clip(240 + grain * 0.3, 220, 255)
-    for c in range(3):
-        result[:, :, c] = result[:, :, c] * (1 - bright_edge * 1.0) + bright_vals * (bright_edge * 1.0)
+    edge_grain = np.clip(180 + grain * 35, 120, 230)
+    bright_boost = bright_edge * edge_grain
+    dark_boost = dark_edge * edge_grain
 
-    dark_vals = np.clip(20 + grain * 0.3, 0, 50)
     for c in range(3):
-        result[:, :, c] = result[:, :, c] * (1 - dark_edge * 1.0) + dark_vals * (dark_edge * 1.0)
+        result[:, :, c] = np.clip(result[:, :, c] + bright_boost, 0, 255)
+        result[:, :, c] = np.clip(result[:, :, c] - dark_boost, 0, 255)
 
     return np.clip(result, 0, 255).astype(np.uint8)
 
