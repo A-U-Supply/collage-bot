@@ -24,6 +24,48 @@ _CURVE_OUT = [  0,   5, 140, 248, 255]
 _LUT = np.interp(np.arange(256), _CURVE_IN, _CURVE_OUT).astype(np.uint8)
 
 
+def apply_edge_halation(composite: np.ndarray, mask_gray: np.ndarray, width: int = 20) -> np.ndarray:
+    """Add grain halation along stencil mask edges.
+
+    White grain bleeds from white (fill-A) regions into black (fill-B) regions.
+    Dark grain bleeds from black regions into white regions.
+    Both fade softly away from the edge.
+    """
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (width * 2 + 1, width * 2 + 1))
+
+    # Dilate white into black → bleed zone on the dark side
+    dilated = cv2.dilate(mask_gray, kernel)
+    white_bleed = cv2.subtract(dilated, mask_gray)
+
+    # Erode white → bleed zone on the bright side
+    eroded = cv2.erode(mask_gray, kernel)
+    black_bleed = cv2.subtract(mask_gray, eroded)
+
+    # Soften zone falloff
+    sigma = width * 0.4
+    white_zone = cv2.GaussianBlur(white_bleed.astype(np.float32), (0, 0), sigmaX=sigma) / 255.0
+    black_zone = cv2.GaussianBlur(black_bleed.astype(np.float32), (0, 0), sigmaX=sigma) / 255.0
+
+    # Grain texture for both zones
+    h, w = mask_gray.shape
+    grain = np.random.normal(0, 35, (h, w)).astype(np.float32)
+    grain = cv2.GaussianBlur(grain, (0, 0), sigmaX=1.5)
+
+    result = composite.astype(np.float32)
+
+    # White grain bleeding into dark side
+    white_grain = np.clip(210 + grain, 160, 255)
+    for c in range(3):
+        result[:, :, c] = result[:, :, c] * (1 - white_zone) + white_grain * white_zone
+
+    # Dark grain bleeding into bright side
+    dark_grain = np.clip(40 + grain, 0, 90)
+    for c in range(3):
+        result[:, :, c] = result[:, :, c] * (1 - black_zone) + dark_grain * black_zone
+
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
 def to_silver_halation(img: Image.Image) -> Image.Image:
     """Apply tonal curve + halation + film grain + silver tone.
 
@@ -103,15 +145,14 @@ def main():
     source_paths = fetch_random_images(token, args.source_channel, 3, source_dir)
     images = [Image.open(p).convert("RGB") for p in source_paths]
 
-    # Pre-compute silver halation version of each image for use as fill
-    silver_images = [to_silver_halation(img) for img in images]
-    logger.info("Applied silver halation to all 3 images")
-
     output_paths = []
     for i, (s, a, b) in enumerate([(0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)]):
-        logger.info(f"Version {i + 1}: image {s + 1} as stencil, {a + 1} and {b + 1} as silver fill...")
+        logger.info(f"Version {i + 1}: image {s + 1} as stencil, {a + 1} and {b + 1} as fill...")
         mask = make_stencil(images[s])
-        result = apply_stencil(mask, silver_images[a], silver_images[b])
+        composite = apply_stencil(mask, images[a], images[b])
+        mask_gray = np.array(mask)
+        composite_arr = apply_edge_halation(np.array(composite), mask_gray)
+        result = Image.fromarray(composite_arr)
         dest = out_dir / f"silver_result_{i + 1}.png"
         result.save(dest)
         logger.info(f"Saved {dest.name}")
