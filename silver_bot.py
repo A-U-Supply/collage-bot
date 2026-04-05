@@ -13,7 +13,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 
 logger = logging.getLogger(__name__)
 
@@ -25,12 +25,13 @@ _LUT = np.interp(np.arange(256), _CURVE_IN, _CURVE_OUT).astype(np.uint8)
 
 
 def to_silver_halation(img: Image.Image) -> Image.Image:
-    """Apply tonal curve + halation to produce a glowing silver gelatin look.
+    """Apply tonal curve + halation + film grain + silver tone.
 
     1. Convert to grayscale
     2. Apply tonal curve (crush blacks, lift midtones, bloom highlights)
-    3. Extract highlights and blur them (halation / halo glow)
-    4. Screen-blend blurred highlights back over the toned image
+    3. Halation: blur highlights and screen-blend back for halo glow
+    4. Film grain: add gaussian noise for organic emulsion texture
+    5. Silver tone: shift whites to cool blue-grey like an aged silver print
     """
     gray = np.array(img.convert("L"))
 
@@ -46,7 +47,26 @@ def to_silver_halation(img: Image.Image) -> Image.Image:
     result = 255.0 - (255.0 - a) * (255.0 - halo) / 255.0
     result = np.clip(result, 0, 255).astype(np.uint8)
 
-    return Image.fromarray(result, mode="L").convert("RGB")
+    # Film grain: add gaussian noise
+    grain = np.random.normal(0, 6, result.shape).astype(np.float32)
+    result = np.clip(result.astype(np.float32) + grain, 0, 255).astype(np.uint8)
+
+    # Silver tone: convert to RGB and tint whites with a cool blue-grey
+    pil = Image.fromarray(result, mode="L").convert("RGB")
+    r, g, b = pil.split()
+    r_arr = np.array(r, dtype=np.float32)
+    g_arr = np.array(g, dtype=np.float32)
+    b_arr = np.array(b, dtype=np.float32)
+
+    # Shift highlights: reduce red slightly, boost blue slightly
+    r_arr = np.clip(r_arr * 0.95, 0, 255)
+    b_arr = np.clip(b_arr * 1.06, 0, 255)
+
+    return Image.merge("RGB", (
+        Image.fromarray(r_arr.astype(np.uint8)),
+        Image.fromarray(g_arr.astype(np.uint8)),
+        Image.fromarray(b_arr.astype(np.uint8)),
+    ))
 
 
 def main():
