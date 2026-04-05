@@ -1,0 +1,109 @@
+"""Collage stencil silver bot.
+
+Like collage-stencil-monochrome-bot but uses a silver gelatin tonal curve
+plus halation (highlight bloom) for a luminous, glowing print effect.
+The stencil image remains full color for mask generation.
+Posts all 6 variations plus an animated GIF as a single message.
+"""
+import argparse
+import logging
+import os
+import sys
+from pathlib import Path
+
+import cv2
+import numpy as np
+from PIL import Image
+
+logger = logging.getLogger(__name__)
+
+# Tonal curve: crushed blacks, rich midtones, bloomed highlights
+# Defined as (input, output) points, interpolated across 0-255
+_CURVE_IN  = [  0,  30, 128, 220, 255]
+_CURVE_OUT = [  0,   5, 140, 235, 255]
+_LUT = np.interp(np.arange(256), _CURVE_IN, _CURVE_OUT).astype(np.uint8)
+
+
+def to_silver_halation(img: Image.Image) -> Image.Image:
+    """Apply tonal curve + halation to produce a glowing silver gelatin look.
+
+    1. Convert to grayscale
+    2. Apply tonal curve (crush blacks, lift midtones, bloom highlights)
+    3. Extract highlights and blur them (halation / halo glow)
+    4. Screen-blend blurred highlights back over the toned image
+    """
+    gray = np.array(img.convert("L"))
+
+    # Apply tonal curve via LUT
+    curved = _LUT[gray]
+
+    # Halation: isolate highlights, apply large gaussian blur
+    highlights = np.where(curved > 200, curved.astype(np.float32), 0.0)
+    halo = cv2.GaussianBlur(highlights, (0, 0), sigmaX=18)
+
+    # Screen blend: result = 255 - ((255-a)*(255-b)/255)
+    a = curved.astype(np.float32)
+    result = 255.0 - (255.0 - a) * (255.0 - halo) / 255.0
+    result = np.clip(result, 0, 255).astype(np.uint8)
+
+    return Image.fromarray(result, mode="L").convert("RGB")
+
+
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+    parser = argparse.ArgumentParser(description="Collage stencil silver bot")
+    parser.add_argument("--source-channel", default="image-gen")
+    parser.add_argument("--post-channel", default="img-junkyard")
+    parser.add_argument("--output-dir", type=Path, default=Path("./silver-bot-output"))
+    parser.add_argument("--frame-duration", type=int, default=85, help="GIF frame duration in ms")
+    parser.add_argument("--no-post", action="store_true")
+    args = parser.parse_args()
+
+    token = os.environ.get("SLACK_BOT_TOKEN")
+    if not token:
+        print("Error: SLACK_BOT_TOKEN required", file=sys.stderr)
+        sys.exit(1)
+
+    from slack_fetcher import fetch_random_images
+    from slack_poster import post_collages
+    from stencil_transform import make_stencil, apply_stencil
+    from gif_bot import make_gif
+
+    source_dir = args.output_dir / "source"
+    out_dir = args.output_dir / "output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info(f"Fetching 3 images from #{args.source_channel}...")
+    source_paths = fetch_random_images(token, args.source_channel, 3, source_dir)
+    images = [Image.open(p).convert("RGB") for p in source_paths]
+
+    # Pre-compute silver halation version of each image for use as fill
+    silver_images = [to_silver_halation(img) for img in images]
+    logger.info("Applied silver halation to all 3 images")
+
+    output_paths = []
+    for i, (s, a, b) in enumerate([(0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)]):
+        logger.info(f"Version {i + 1}: image {s + 1} as stencil, {a + 1} and {b + 1} as silver fill...")
+        mask = make_stencil(images[s])
+        result = apply_stencil(mask, silver_images[a], silver_images[b])
+        dest = out_dir / f"silver_result_{i + 1}.png"
+        result.save(dest)
+        logger.info(f"Saved {dest.name}")
+        output_paths.append(dest)
+
+    gif_path = out_dir / f"silver_stencil_{args.frame_duration}ms.gif"
+    logger.info(f"Creating GIF at {args.frame_duration}ms/frame...")
+    make_gif(output_paths, gif_path, frame_duration_ms=args.frame_duration)
+
+    post_paths = output_paths + [gif_path]
+
+    if not args.no_post:
+        post_collages(token, args.post_channel, post_paths, bot_name="collage-stencil-silver-bot", threaded=False)
+        logger.info(f"Posted {len(post_paths)} files to #{args.post_channel}")
+    else:
+        logger.info(f"Saved to {out_dir} (--no-post)")
+
+
+if __name__ == "__main__":
+    main()
