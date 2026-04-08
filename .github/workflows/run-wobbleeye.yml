@@ -1,0 +1,36 @@
+name: Run Collage Stencil Wobble Eye Bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_channel:
+        description: 'Channel to fetch images from'
+        default: 'image-gen'
+      post_channel:
+        description: 'Channel to post results to'
+        default: 'img-junkyard'
+      rings:
+        description: 'Number of rings (3–10)'
+        default: '5'
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run collage stencil wobble eye bot
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          python wobbleeye_bot.py \
+            --source-channel "${{ inputs.source_channel }}" \
+            --post-channel "${{ inputs.post_channel }}" \
+            --rings "${{ inputs.rings }}"
