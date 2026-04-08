@@ -118,6 +118,7 @@ def main():
 
     from slack_fetcher import fetch_random_images
     from slack_poster import post_collages
+    from stencil_transform import make_stencil
 
     source_dir = args.output_dir / "source"
     out_dir = args.output_dir / "output"
@@ -134,8 +135,13 @@ def main():
     result.save(dest)
     logger.info(f"Saved {dest.name}")
 
+    binary = make_stencil(result).convert("RGB")
+    dest_binary = out_dir / "sixshooter_binary.png"
+    binary.save(dest_binary)
+    logger.info(f"Saved {dest_binary.name}")
+
     if not args.no_post:
-        post_collages(token, args.post_channel, [dest], bot_name="collage-stencil-sixshooter-bot", threaded=False)
+        post_collages(token, args.post_channel, [dest, dest_binary], bot_name="collage-stencil-sixshooter-bot", threaded=False)
         logger.info(f"Posted to #{args.post_channel}")
     else:
         logger.info(f"Saved to {out_dir} (--no-post)")
