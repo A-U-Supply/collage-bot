@@ -1,4 +1,5 @@
 """Fetch random images from a Slack channel."""
+import json
 import logging
 import random
 from pathlib import Path
@@ -70,7 +71,7 @@ def fetch_random_images(
                     url = f.get("url_private_download") or f.get("url_private")
                     if url:
                         ext = f.get("filetype", "jpg")
-                        all_images.append({"url": url, "ext": ext, "id": f["id"]})
+                        all_images.append({"url": url, "ext": ext, "id": f["id"], "permalink": f.get("permalink", "")})
 
         cursor = resp.get("response_metadata", {}).get("next_cursor")
         if not cursor:
@@ -87,6 +88,9 @@ def fetch_random_images(
         dest = download_dir / f"source_{i}.{img['ext']}"
         data = _download_with_auth(img["url"], token)
         dest.write_bytes(data)
+        # Write sidecar with permalink so bots can reference the original post
+        sidecar = download_dir / f"source_{i}.meta.json"
+        sidecar.write_text(json.dumps({"permalink": img["permalink"]}))
         logger.info(f"Downloaded {dest.name}")
         paths.append(dest)
 
