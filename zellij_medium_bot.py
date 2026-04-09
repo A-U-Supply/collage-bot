@@ -1,9 +1,11 @@
-"""Collage stencil zellij bot.
+"""Collage stencil zellij medium bot.
 
 Inspired by Moroccan zellij tilework. Divides the image into a classic Islamic
 6-pointed star grid on a triangular lattice. Stars and shield-shaped connectors
 between adjacent pairs of stars are cut from the source image, shuffled within
 their respective groups, and pasted back without rotation.
+
+Uses a larger tile size (min dimension / 3) than the standard zellij bot.
 
 Posts a color result and an Otsu binary version.
 """
@@ -24,7 +26,7 @@ SQRT3 = math.sqrt(3)
 
 def apply_zellij(img: Image.Image) -> Image.Image:
     w, h = img.size
-    S = max(60, min(w, h) // 6)
+    S = max(60, min(w, h) // 3)
 
     R_out = S * 0.42
     R_in = R_out * 0.50
@@ -67,10 +69,6 @@ def apply_zellij(img: Image.Image) -> Image.Image:
             star_pastes.append((x0, y0))
 
     # Shield crops: 3 edge directions × 2 sides (upper/lower) = 6 orientation groups
-    # For edge A→B at angle theta:
-    #   upper shield (sign=+1): A outer@θ, A inner@θ+30°, A outer@θ+60°,
-    #                            B outer@θ+120°, B inner@θ+150°, B outer@θ+180°
-    #   lower shield (sign=-1): same with negative offsets
     neighbor_dirs = [(1, 0, 0.0), (0, 1, 60.0), (-1, 1, 120.0)]
 
     shield_groups = [[] for _ in range(6)]  # 0-2 upper, 3-5 lower
@@ -141,10 +139,10 @@ def apply_zellij(img: Image.Image) -> Image.Image:
 def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    parser = argparse.ArgumentParser(description="Collage stencil zellij bot")
+    parser = argparse.ArgumentParser(description="Collage stencil zellij medium bot")
     parser.add_argument("--source-channel", default="image-gen")
     parser.add_argument("--post-channel", default="img-junkyard")
-    parser.add_argument("--output-dir", type=Path, default=Path("./zellij-bot-output"))
+    parser.add_argument("--output-dir", type=Path, default=Path("./zellij-medium-bot-output"))
     parser.add_argument("--no-post", action="store_true")
     args = parser.parse_args()
 
@@ -168,17 +166,17 @@ def main():
     logger.info(f"Image size: {img.width}×{img.height}")
     result = apply_zellij(img)
 
-    dest = out_dir / "zellij_result.png"
+    dest = out_dir / "zellij_medium_result.png"
     result.save(dest)
     logger.info(f"Saved {dest.name}")
 
     binary = make_stencil(result).convert("RGB")
-    dest_binary = out_dir / "zellij_binary.png"
+    dest_binary = out_dir / "zellij_medium_binary.png"
     binary.save(dest_binary)
     logger.info(f"Saved {dest_binary.name}")
 
     if not args.no_post:
-        post_collages(token, args.post_channel, [dest, dest_binary], bot_name="collage-stencil-zellij-bot", threaded=False)
+        post_collages(token, args.post_channel, [dest, dest_binary], bot_name="collage-stencil-zellij-medium-bot", threaded=False)
         logger.info(f"Posted to #{args.post_channel}")
     else:
         logger.info(f"Saved to {out_dir} (--no-post)")
