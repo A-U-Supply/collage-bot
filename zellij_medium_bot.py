@@ -17,6 +17,7 @@ import random
 import sys
 from pathlib import Path
 
+import numpy as np
 from PIL import Image, ImageDraw
 
 logger = logging.getLogger(__name__)
@@ -58,15 +59,17 @@ def apply_zellij(img: Image.Image) -> Image.Image:
 
     logger.info(f"S={S}px, {len(lattice)} star positions")
 
-    # Star crops — only include positions fully inside the image
+    # Reflect-pad source so edge crops never go out of bounds
+    pad = int(S * 0.6)
+    src = Image.fromarray(np.pad(np.array(img), ((pad, pad), (pad, pad), (0, 0)), mode='reflect'))
+
+    # Star crops — all lattice positions, cropped from padded source
     star_crops = []
     star_pastes = []
     for px, py in lattice.values():
         x0, y0 = int(px) - box, int(py) - box
-        x1, y1 = x0 + star_size, y0 + star_size
-        if x0 >= 0 and y0 >= 0 and x1 <= w and y1 <= h:
-            star_crops.append(img.crop((x0, y0, x1, y1)))
-            star_pastes.append((x0, y0))
+        star_crops.append(src.crop((x0 + pad, y0 + pad, x0 + pad + star_size, y0 + pad + star_size)))
+        star_pastes.append((x0, y0))
 
     # Shield crops: 3 edge directions × 2 sides (upper/lower) = 6 orientation groups
     neighbor_dirs = [(1, 0, 0.0), (0, 1, 60.0), (-1, 1, 120.0)]
@@ -98,7 +101,7 @@ def apply_zellij(img: Image.Image) -> Image.Image:
         local = [(x - x0, y - y0) for x, y in pts]
         mask = Image.new("L", (mw, mh), 0)
         ImageDraw.Draw(mask).polygon(local, fill=255)
-        crop = img.crop((x0, y0, x1, y1))
+        crop = src.crop((x0 + pad, y0 + pad, x1 + pad, y1 + pad))
         return crop, mask, (x0, y0)
 
     for dir_idx, (dq, dr, theta_deg) in enumerate(neighbor_dirs):
@@ -110,10 +113,7 @@ def apply_zellij(img: Image.Image) -> Image.Image:
             bx, by = lattice[nb]
             for sign, group_offset in [(+1, 0), (-1, 3)]:
                 crop, mask, paste_xy = make_shield_item(ax, ay, bx, by, theta, sign)
-                px0, py0 = paste_xy
-                # Only add to shuffle pool if fully inside the image
-                if px0 >= 0 and py0 >= 0 and px0 + mask.size[0] <= w and py0 + mask.size[1] <= h:
-                    shield_groups[dir_idx + group_offset].append((crop, mask, paste_xy))
+                shield_groups[dir_idx + group_offset].append((crop, mask, paste_xy))
 
     total_shields = sum(len(g) for g in shield_groups)
     logger.info(f"Shields: {total_shields} in 6 orientation groups")
