@@ -33,7 +33,7 @@ def preprocess_for_screen(img: Image.Image) -> np.ndarray:
     return _SCURVE_LUT[enhanced]
 
 
-def find_brightness_peaks(raw_gray: np.ndarray, n_peaks: int, min_dist_frac: float = 0.12) -> list:
+def find_brightness_peaks(raw_gray: np.ndarray, n_peaks: int, min_dist_frac: float = 0.20) -> list:
     """Find bright-spot peaks from raw (non-enhanced) grayscale.
 
     Uses a blurred version of the original image so origins land on genuine
@@ -61,9 +61,9 @@ def find_brightness_peaks(raw_gray: np.ndarray, n_peaks: int, min_dist_frac: flo
             for r in range(rows) for c in range(cols)][:n_peaks]
 
 
-def make_oilspiralcells_stencil(img: Image.Image, frequency: int = 20,
-                                 warp_strength: float = 2.0, n_peaks: int = 16,
-                                 topo_blend: float = 0.4,
+def make_oilspiralcells_stencil(img: Image.Image, frequency: int = 35,
+                                 warp_strength: float = 2.0, n_peaks: int = 6,
+                                 topo_blend: float = 0.2,
                                  preprocess: bool = True) -> Image.Image:
     """Voronoi spiral-cells screen with brightness-contour blending.
 
@@ -147,10 +147,10 @@ def main():
     parser.add_argument("--source-channel", default="image-gen")
     parser.add_argument("--post-channel", default="img-junkyard")
     parser.add_argument("--output-dir", type=Path, default=Path("./oilspiralcells-bot-output"))
-    parser.add_argument("--frequency", type=int, default=20)
+    parser.add_argument("--frequency", type=int, default=35)
     parser.add_argument("--warp-strength", type=float, default=2.0)
-    parser.add_argument("--n-peaks", type=int, default=16)
-    parser.add_argument("--topo-blend", type=float, default=0.4,
+    parser.add_argument("--n-peaks", type=int, default=6)
+    parser.add_argument("--topo-blend", type=float, default=0.2,
                         help="Blend of topographic brightness contours into spiral (0=pure spiral, 1=pure topo)")
     parser.add_argument("--no-preprocess", action="store_true")
     parser.add_argument("--no-post", action="store_true")
