@@ -1,13 +1,15 @@
 """Collage stencil oil spiral cells bleed bot.
 
-Like oilspiralcells but with two additional effects:
+Voronoi spiral-cells stencil. Fill images are composited at the largest available
+resolution inside the hard stencil boundary and processed with chrome/water effects:
 
-1. Radial bleed from peaks — spiral arms are denser/wider near the peak
-   center and thin out toward cell edges, creating a glow-from-center feel.
-
-2. Fill warp toward spiral center — the fill image shown through the white
-   stencil regions has its sampling coordinates pulled toward each cell's
-   spiral peak, stretching/zooming the texture toward each origin.
+Fill effects applied in order (both layers):
+1. Sinusoidal ripple warp  — distortion perpendicular to arm direction (rippling water /
+                              curved chrome reflection)
+2. Chromatic aberration    — R/B split along arm direction (prismatic edge sheen)
+3. Contrast stretch        — deepen darks, punch highlights (chrome look)
+4. Bulge warp              — stretch pixels near spine, compress at edges; creates the
+                              appearance of raised liquid rivulets without any overlay
 
 Posts all 6 variations plus the 3 stencil masks.
 """
@@ -60,23 +62,33 @@ def find_brightness_peaks(raw_gray: np.ndarray, n_peaks: int, min_dist_frac: flo
 
 
 def make_oilspiralcellsbleed_stencil(img: Image.Image, frequency: int = 35,
-                                      warp_strength: float = 2.0, n_peaks: int = 6,
+                                      warp_strength: float = 4.0, n_peaks: int = 6,
                                       topo_blend: float = 0.2,
                                       bleed_strength: float = 0.35,
-                                      fill_warp_strength: float = 0.4,
-                                      feather_bleed: float = 0.6,
                                       preprocess: bool = True):
-    """Voronoi spiral-cells screen with radial bleed, feathered edges, and fill warp maps.
+    """Voronoi spiral-cells screen.
 
-    Returns (mask, soft_alpha, x_fill, y_fill):
-      mask       — hard binary PIL Image (for display)
-      soft_alpha — float32 (h,w) feathered composite weight; 1.0 inside lines,
-                   exponential decay outside line edges into background areas
-      x_fill, y_fill — float32 cv2.remap maps pulling fill toward each spiral peak
+    Heavy computation is capped at PROC_MAX pixels on the longest dimension and
+    upsampled back to original resolution at the end.
+
+    Returns (mask, smooth_angle):
+      mask         — hard binary PIL Image at original resolution
+      smooth_angle — float32 (h,w) local arm direction field, used for fill effects
     """
     raw_gray = np.array(img.convert("L"))
     enhanced = preprocess_for_screen(img) if preprocess else raw_gray.copy()
     h, w = enhanced.shape
+
+    # --- Downsample FIRST so all heavy computation runs at capped resolution ---
+    # This includes peak detection (avoids huge dilation kernels on full-res images)
+    PROC_MAX = 768
+    scale = min(1.0, PROC_MAX / max(h, w))
+    if scale < 1.0:
+        ph, pw = int(h * scale), int(w * scale)
+        enhanced = cv2.resize(enhanced, (pw, ph), interpolation=cv2.INTER_AREA)
+        raw_gray = cv2.resize(raw_gray, (pw, ph), interpolation=cv2.INTER_AREA)
+    else:
+        ph, pw = h, w
 
     peaks = find_brightness_peaks(raw_gray, n_peaks)
 
@@ -99,7 +111,7 @@ def make_oilspiralcellsbleed_stencil(img: Image.Image, frequency: int = 35,
 
     # --- Warp coordinates ---
     warp_pixels = frequency * warp_strength
-    y_g, x_g = np.mgrid[0:h, 0:w].astype(np.float32)
+    y_g, x_g = np.mgrid[0:ph, 0:pw].astype(np.float32)
     x_w = x_g + edge_weight * warp_pixels * np.cos(smooth_angle)
     y_w = y_g + edge_weight * warp_pixels * np.sin(smooth_angle)
 
@@ -110,9 +122,9 @@ def make_oilspiralcellsbleed_stencil(img: Image.Image, frequency: int = 35,
     r_map = np.min(dist_stack, axis=0)
 
     # --- Spiral phase per cell ---
-    theta_map = np.zeros((h, w), dtype=np.float32)
-    r_max_map = np.zeros((h, w), dtype=np.float32)
-    corners = [(0, 0), (w, 0), (0, h), (w, h)]
+    theta_map = np.zeros((ph, pw), dtype=np.float32)
+    r_max_map = np.zeros((ph, pw), dtype=np.float32)
+    corners = [(0, 0), (pw, 0), (0, ph), (pw, ph)]
 
     for i, (px, py) in enumerate(peaks):
         mask = (cell_idx == i)
@@ -120,11 +132,11 @@ def make_oilspiralcellsbleed_stencil(img: Image.Image, frequency: int = 35,
         r_max = max(np.sqrt((cx - px) ** 2 + (cy - py) ** 2) for cx, cy in corners)
         r_max_map[mask] = max(r_max, 1.0)
 
-    spiral_phase = r_map ** 3 / (frequency * r_max_map ** 2 + 1e-6) - theta_map / (2 * np.pi)
+    spiral_phase = r_map / frequency - theta_map / (2 * np.pi)
 
     # --- Brightness contour phase (topographic) ---
     topo_gray = cv2.GaussianBlur(raw_gray.astype(np.float32), (0, 0), sigmaX=10)
-    topo_phase = topo_gray / 255.0 * (max(h, w) / frequency)
+    topo_phase = topo_gray / 255.0 * (max(ph, pw) / frequency)
     screen = ((1 - topo_blend) * spiral_phase + topo_blend * topo_phase) % 1.0
 
     # --- Threshold with radial bleed boost ---
@@ -137,31 +149,94 @@ def make_oilspiralcellsbleed_stencil(img: Image.Image, frequency: int = 35,
     gray_boosted = np.clip(gray_01 + bleed_boost, 0.0, 1.0)
     binary = (gray_boosted > screen).astype(np.uint8) * 255
 
-    # --- Fill warp maps ---
-    x_fill = x_g.copy()
-    y_fill = y_g.copy()
+    # --- Upsample results back to original resolution ---
+    if scale < 1.0:
+        binary = cv2.resize(binary, (w, h), interpolation=cv2.INTER_NEAREST)
+        smooth_angle = cv2.resize(smooth_angle, (w, h), interpolation=cv2.INTER_LINEAR)
 
-    for i, (px, py) in enumerate(peaks):
-        cell_mask = (cell_idx == i)
-        pull = fill_warp_strength * r_norm                  # 0 at peak, max at edge
-        x_fill[cell_mask] = x_g[cell_mask] + pull[cell_mask] * (px - x_g[cell_mask])
-        y_fill[cell_mask] = y_g[cell_mask] + pull[cell_mask] * (py - y_g[cell_mask])
+    return Image.fromarray(binary), smooth_angle
 
-    x_fill = np.clip(x_fill, 0, w - 1)
-    y_fill = np.clip(y_fill, 0, h - 1)
 
-    # --- Feathered bleed from line edges ---
-    # Distance from white line regions, measured into the black (background) areas.
-    # Exponential decay gives a smooth, organic spread — like pigment in oil film.
-    feather_sigma = max(1.0, frequency * feather_bleed)
-    dist_from_white = cv2.distanceTransform(
-        (binary == 0).astype(np.uint8) * 255, cv2.DIST_L2, 5
-    )
-    feather_alpha = np.exp(-dist_from_white / feather_sigma)
-    # Hard line interior is always 1.0; feathering extends beyond the edge
-    soft_alpha = np.maximum(binary.astype(np.float32) / 255.0, feather_alpha)
+def apply_fill_effects(img_arr: np.ndarray, smooth_angle: np.ndarray,
+                       chroma_shift: int = 10,
+                       ripple_amplitude: int = 20,
+                       ripple_wavelength: float = 40.0) -> np.ndarray:
+    """Apply chrome / rippling-water distortion to a fill layer.
 
-    return Image.fromarray(binary), soft_alpha, x_fill, y_fill
+    1. Sinusoidal ripple warp  — pixels displaced perp to arm direction
+    2. Chromatic aberration    — R/B split along arm direction
+    3. Contrast stretch        — punch darks and lights for chrome look
+    """
+    h, w = img_arr.shape[:2]
+    y_g, x_g = np.mgrid[0:h, 0:w].astype(np.float32)
+
+    cos_a = np.cos(smooth_angle)
+    sin_a = np.sin(smooth_angle)
+
+    # 1. Sinusoidal ripple — displace perpendicular to arm direction
+    phase = x_g * cos_a + y_g * sin_a
+    ripple = (ripple_amplitude * np.sin(2.0 * np.pi * phase / ripple_wavelength)).astype(np.float32)
+    xs = np.clip(x_g + ripple * (-sin_a), 0, w - 1)
+    ys = np.clip(y_g + ripple * cos_a, 0, h - 1)
+    out = cv2.remap(img_arr, xs, ys, cv2.INTER_LINEAR)
+
+    # 2. Chromatic aberration — R forward, B backward along arm direction
+    xs_r = np.clip(x_g + chroma_shift * cos_a, 0, w - 1)
+    ys_r = np.clip(y_g + chroma_shift * sin_a, 0, h - 1)
+    xs_b = np.clip(x_g - chroma_shift * cos_a, 0, w - 1)
+    ys_b = np.clip(y_g - chroma_shift * sin_a, 0, h - 1)
+    r_ch = cv2.remap(out[:, :, 0], xs_r, ys_r, cv2.INTER_LINEAR)
+    b_ch = cv2.remap(out[:, :, 2], xs_b, ys_b, cv2.INTER_LINEAR)
+    out = np.stack([r_ch, out[:, :, 1], b_ch], axis=2)
+
+    # 3. Contrast stretch — S-curve to deepen darks and punch highlights (chrome)
+    lut = np.arange(256, dtype=np.float32)
+    lut = 128 + 128 * np.tanh((lut - 128) / 85.0)
+    lut = np.clip(lut, 0, 255).astype(np.uint8)
+    out = lut[out]
+
+    return out
+
+
+def apply_bulge_warp(img_arr: np.ndarray, mask_L: np.ndarray,
+                     bulge_strength: float = 0.6) -> np.ndarray:
+    """Warp fill pixels to make stencil lines look like raised liquid rivulets.
+
+    Uses the distance transform inside white regions as a height map. The spine
+    (centre of each line) has height 1; edges have height 0.
+
+    Source coordinates are displaced *away* from the spine proportional to
+    (1 - height), so:
+    - Spine pixels sample with no displacement  → texture looks stretched/magnified
+    - Edge pixels sample from further outside   → texture is compressed
+    This creates the appearance of a convex surface without any brightness overlay.
+    """
+    h, w = img_arr.shape[:2]
+    y_g, x_g = np.mgrid[0:h, 0:w].astype(np.float32)
+
+    inside = (mask_L > 127).astype(np.uint8) * 255
+    dist_in = cv2.distanceTransform(inside, cv2.DIST_L2, 5)
+
+    # Normalise so thin and thick lines get the same 0→1 range
+    nonzero = dist_in[dist_in > 0]
+    scale = float(np.percentile(nonzero, 95)) if len(nonzero) else 1.0
+    height = np.clip(dist_in / (scale + 1e-6), 0, 1).astype(np.float32)
+
+    # Smooth dist_in before computing gradient so displacement direction is smooth
+    dist_smooth = cv2.GaussianBlur(dist_in, (0, 0), sigmaX=scale * 0.5)
+    gx_h = cv2.Sobel(dist_smooth, cv2.CV_32F, 1, 0, ksize=5)
+    gy_h = cv2.Sobel(dist_smooth, cv2.CV_32F, 0, 1, ksize=5)
+    grad_mag = np.sqrt(gx_h ** 2 + gy_h ** 2) + 1e-6
+    nx_h = gx_h / grad_mag
+    ny_h = gy_h / grad_mag
+
+    # Displacement: max at edge (height=0), zero at spine (height=1)
+    # Subtracting the toward-spine direction = pushing source coords away from spine
+    displacement = (bulge_strength * scale * (1.0 - height)).astype(np.float32)
+    src_x = np.clip(x_g - displacement * nx_h, 0, w - 1)
+    src_y = np.clip(y_g - displacement * ny_h, 0, h - 1)
+
+    return cv2.remap(img_arr, src_x, src_y, cv2.INTER_LINEAR)
 
 
 def main():
@@ -171,17 +246,20 @@ def main():
     parser.add_argument("--source-channel", default="image-gen")
     parser.add_argument("--post-channel", default="img-junkyard")
     parser.add_argument("--output-dir", type=Path, default=Path("./oilspiralcellsbleed-bot-output"))
-    parser.add_argument("--frequency", type=int, default=35)
-    parser.add_argument("--warp-strength", type=float, default=2.0)
+    parser.add_argument("--frequency", type=int, default=15)
+    parser.add_argument("--warp-strength", type=float, default=4.0)
     parser.add_argument("--n-peaks", type=int, default=6)
-    parser.add_argument("--topo-blend", type=float, default=0.2,
-                        help="Blend of topographic brightness contours into spiral (0=pure spiral, 1=pure topo)")
-    parser.add_argument("--bleed-strength", type=float, default=0.35,
-                        help="Radial density boost at spiral center (0=off)")
-    parser.add_argument("--fill-warp-strength", type=float, default=0.4,
-                        help="How far fill samples are pulled toward spiral peak (0=off, 1=fully collapsed)")
-    parser.add_argument("--feather-bleed", type=float, default=0.6,
-                        help="Feather spread from line edges as fraction of frequency (e.g. 0.6 = 21px at freq=35)")
+    parser.add_argument("--topo-blend", type=float, default=0.2)
+    parser.add_argument("--bleed-strength", type=float, default=0.35)
+    # Fill effect params
+    parser.add_argument("--chroma-shift", type=int, default=10,
+                        help="Chromatic aberration shift in pixels along arm direction")
+    parser.add_argument("--ripple-amplitude", type=int, default=20,
+                        help="Sinusoidal ripple displacement in pixels (chrome/water warp)")
+    parser.add_argument("--ripple-wavelength", type=float, default=40.0,
+                        help="Ripple wavelength in pixels")
+    parser.add_argument("--bulge-strength", type=float, default=0.8,
+                        help="Rivulet bulge warp strength — 0 = off, 1 = full")
     parser.add_argument("--no-preprocess", action="store_true")
     parser.add_argument("--no-post", action="store_true")
     args = parser.parse_args()
@@ -204,15 +282,12 @@ def main():
 
     masks = []
     mask_paths = []
-    soft_alphas = []
-    fill_maps = []
+    smooth_angles = []
     for i, img in enumerate(images):
-        mask, soft_alpha, x_fill, y_fill = make_oilspiralcellsbleed_stencil(
+        mask, smooth_angle = make_oilspiralcellsbleed_stencil(
             img, frequency=args.frequency, warp_strength=args.warp_strength,
             n_peaks=args.n_peaks, topo_blend=args.topo_blend,
             bleed_strength=args.bleed_strength,
-            fill_warp_strength=args.fill_warp_strength,
-            feather_bleed=args.feather_bleed,
             preprocess=not args.no_preprocess
         )
         dest = out_dir / f"oilspiralcellsbleed_mask_{i + 1}.png"
@@ -220,23 +295,48 @@ def main():
         logger.info(f"Saved {dest.name}")
         masks.append(mask)
         mask_paths.append(dest)
-        soft_alphas.append(soft_alpha)
-        fill_maps.append((x_fill, y_fill))
+        smooth_angles.append(smooth_angle)
+
+    # Output at the largest source image resolution
+    target_w, target_h = max((img.size for img in images), key=lambda s: s[0] * s[1])
+    logger.info(f"Output resolution: {target_w}×{target_h}")
+
+    # Scale pixel-based params to output resolution (calibrated at 1024px short side)
+    res_scale = min(target_w, target_h) / 1024.0
+    fx_kwargs = dict(
+        chroma_shift=int(args.chroma_shift * res_scale),
+        ripple_amplitude=int(args.ripple_amplitude * res_scale),
+        ripple_wavelength=args.ripple_wavelength * res_scale,
+    )
 
     output_paths = []
     for i, (s, a, b) in enumerate([(0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)]):
         logger.info(f"Version {i + 1}: image {s + 1} as oil spiral cells bleed stencil...")
-        mw, mh = masks[s].size
-        img_a_rs = images[a].convert("RGB").resize((mw, mh), Image.LANCZOS)
-        img_b_rs = images[b].convert("RGB").resize((mw, mh), Image.LANCZOS)
 
-        x_fill, y_fill = fill_maps[s]
-        img_a_warped = cv2.remap(np.array(img_a_rs), x_fill, y_fill, cv2.INTER_LINEAR)
+        img_a_arr = np.array(images[a].convert("RGB").resize((target_w, target_h), Image.LANCZOS))
+        img_b_arr = np.array(images[b].convert("RGB").resize((target_w, target_h), Image.LANCZOS))
+        mask_resized = np.array(masks[s].resize((target_w, target_h), Image.NEAREST).convert("L"))
+        angle_resized = cv2.resize(smooth_angles[s], (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+        angle_b = cv2.resize(smooth_angles[b], (target_w, target_h), interpolation=cv2.INTER_LINEAR)
 
-        alpha = soft_alphas[s][:, :, np.newaxis]   # (h, w, 1) float32
-        composite = (alpha * img_a_warped.astype(np.float32)
-                     + (1.0 - alpha) * np.array(img_b_rs).astype(np.float32))
-        result = Image.fromarray(np.clip(composite, 0, 255).astype(np.uint8))
+        img_a_processed = apply_fill_effects(img_a_arr, angle_resized, **fx_kwargs)
+        img_b_processed = apply_fill_effects(img_b_arr, angle_b, **fx_kwargs)
+
+        # Bulge warp — applied after fill effects so ripple/chroma are also stretched
+        img_a_processed = apply_bulge_warp(img_a_processed, mask_resized, args.bulge_strength)
+        img_b_processed = apply_bulge_warp(img_b_processed, mask_resized, args.bulge_strength)
+
+        # Composite: hard binary mask — fill only inside stencil lines
+        composite = np.where(
+            mask_resized[:, :, np.newaxis] > 127,
+            img_a_processed.astype(np.float32),
+            img_b_processed.astype(np.float32)
+        ).astype(np.uint8)
+
+        # Unsharp mask — restore crispness lost in warping steps
+        blurred = cv2.GaussianBlur(composite, (0, 0), sigmaX=2.0)
+        sharp = cv2.addWeighted(composite, 1.8, blurred, -0.8, 0)
+        result = Image.fromarray(sharp)
 
         dest = out_dir / f"oilspiralcellsbleed_result_{i + 1}.png"
         result.save(dest)
