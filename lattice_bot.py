@@ -83,6 +83,39 @@ def make_organic_lattice(img_a: np.ndarray, img_b: np.ndarray, img_c: np.ndarray
         img_a[active],
         img_b[active]
     )
+
+    # --- Over/under shadow ---
+    cell_h = row_period - gap_px
+    cell_w = col_period - gap_px
+
+    # Normalized position within the active cell region [0, 1]
+    cell_y = ((y_frac - half_gap) / cell_h).clip(0, 1)
+    cell_x = ((x_frac - half_gap) / cell_w).clip(0, 1)
+
+    # Physical pixel distance from each edge
+    dist_top    = cell_y * cell_h
+    dist_bottom = (1.0 - cell_y) * cell_h
+    dist_left   = cell_x * cell_w
+    dist_right  = (1.0 - cell_x) * cell_w
+
+    shadow_decay = max(gap_px * 3.0, 4.0)
+    shadow_strength = 0.45
+
+    # col on top → under-strip enters from top/bottom → darken those edges
+    shadow_col_on_top = (np.exp(-dist_top / shadow_decay) +
+                         np.exp(-dist_bottom / shadow_decay)) * shadow_strength
+
+    # row on top → under-strip enters from left/right → darken those edges
+    shadow_row_on_top = (np.exp(-dist_left / shadow_decay) +
+                         np.exp(-dist_right / shadow_decay)) * shadow_strength
+
+    shadow_map = np.where(use_a, shadow_col_on_top, shadow_row_on_top)
+    shadow_map = np.clip(shadow_map, 0.0, shadow_strength)
+
+    result_f = result.astype(np.float32)
+    result_f[active] *= (1.0 - shadow_map[active, np.newaxis])
+    result = result_f.clip(0, 255).astype(np.uint8)
+
     return result
 
 
