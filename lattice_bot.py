@@ -1,7 +1,8 @@
 """Collage lattice bot.
 
-Fetches 3 images and weaves A and B into a lattice of strips. C shows through
-the gaps between strips. Produces 5 variations — one per weave structure:
+Fetches 3 images and weaves A and B into a lattice of strips with organic,
+wavy boundaries. C shows through the gaps between strips.
+Produces 5 variations — one per weave structure:
 
 1. Plain      — 1×1 checkerboard
 2. Basket     — 2×2 block checkerboard
@@ -21,57 +22,67 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 
-def weave_cell(row: int, col: int, weave: str, n: int) -> bool:
-    """Return True if cell (row, col) should show image A."""
-    if weave == 'plain':
-        return (row + col) % 2 == 0
-    elif weave == 'basket':
-        return (row // 2 + col // 2) % 2 == 0
-    elif weave == 'twill':
-        # 2/2 twill: diagonal stripes 2 cells wide
-        return (row + col) % 4 >= 2
-    elif weave == 'herringbone':
-        # Twill that reverses at the centre column → chevron
-        mid = n // 2
-        if col < mid:
-            return (row + col) % 4 >= 2
-        else:
-            return (row + (n - 1 - col)) % 4 >= 2
-    elif weave == 'satin':
-        # 5-end satin: B at isolated binding points, A everywhere else
-        return (col - row * 2) % 5 != 0
-    return True
-
-
-def make_lattice(img_a: np.ndarray, img_b: np.ndarray, img_c: np.ndarray,
-                 n_strips: int, gap: int, weave: str) -> np.ndarray:
-    """Weave img_a and img_b into a lattice with img_c showing through the gaps.
+def make_organic_lattice(img_a: np.ndarray, img_b: np.ndarray, img_c: np.ndarray,
+                         n_strips: int, gap_px: float, weave: str,
+                         warp_strength: float = 0.4, warp_freq: float = 2.0) -> np.ndarray:
+    """Weave img_a and img_b into a lattice with wavy organic strip boundaries.
 
     Args:
         img_a, img_b, img_c : (H, W, 3) uint8 arrays, same size
-        n_strips : number of strips in each dimension
-        gap      : width of the gap between strips in pixels
-        weave    : weave structure name
+        n_strips    : number of strips in each dimension
+        gap_px      : gap width in pixels (already resolution-scaled)
+        weave       : weave structure name
+        warp_strength : warp amplitude as fraction of cell size (0 = straight)
+        warp_freq   : number of sine cycles across the full image width/height
     """
     h, w = img_a.shape[:2]
-    cell_w = (w - (n_strips + 1) * gap) // n_strips
-    cell_h = (h - (n_strips + 1) * gap) // n_strips
+    xx = np.arange(w, dtype=np.float32)
+    yy = np.arange(h, dtype=np.float32)
+    xx, yy = np.meshgrid(xx, yy)
 
-    if cell_w < 1 or cell_h < 1:
-        raise ValueError(f"Gap too large for {n_strips} strips at {w}×{h}")
+    cell_size = min(h, w) / n_strips
+    amplitude = cell_size * warp_strength
 
-    # Canvas starts as img_c — gaps reveal it naturally
+    # Warp effective coords — different phases so row and col warps look independent
+    y_eff = yy + amplitude * np.sin(2 * np.pi * warp_freq * xx / w)
+    x_eff = xx + amplitude * np.sin(2 * np.pi * warp_freq * yy / h + np.pi * 0.7)
+
+    row_period = h / n_strips
+    col_period = w / n_strips
+
+    y_frac = y_eff % row_period
+    x_frac = x_eff % col_period
+
+    half_gap = gap_px / 2.0
+    in_gap = (y_frac < half_gap) | (y_frac > row_period - half_gap) \
+           | (x_frac < half_gap) | (x_frac > col_period - half_gap)
+
+    row_idx = (y_eff / row_period).astype(np.int32).clip(0, n_strips - 1)
+    col_idx = (x_eff / col_period).astype(np.int32).clip(0, n_strips - 1)
+    n = n_strips
+
+    if weave == 'plain':
+        use_a = (row_idx + col_idx) % 2 == 0
+    elif weave == 'basket':
+        use_a = (row_idx // 2 + col_idx // 2) % 2 == 0
+    elif weave == 'twill':
+        use_a = (row_idx + col_idx) % 4 >= 2
+    elif weave == 'herringbone':
+        use_a = np.where(col_idx < n // 2,
+                         (row_idx + col_idx) % 4 >= 2,
+                         (row_idx + (n - 1 - col_idx)) % 4 >= 2)
+    elif weave == 'satin':
+        use_a = (col_idx - row_idx * 2) % 5 != 0
+    else:
+        use_a = np.ones((h, w), dtype=bool)
+
     result = img_c.copy()
-
-    for row in range(n_strips):
-        for col in range(n_strips):
-            x1 = gap + col * (cell_w + gap)
-            y1 = gap + row * (cell_h + gap)
-            x2 = x1 + cell_w
-            y2 = y1 + cell_h
-            src = img_a if weave_cell(row, col, weave, n_strips) else img_b
-            result[y1:y2, x1:x2] = src[y1:y2, x1:x2]
-
+    active = ~in_gap
+    result[active] = np.where(
+        use_a[active, np.newaxis],
+        img_a[active],
+        img_b[active]
+    )
     return result
 
 
@@ -82,10 +93,14 @@ def main():
     parser.add_argument("--source-channel", default="image-gen")
     parser.add_argument("--post-channel", default="img-junkyard")
     parser.add_argument("--output-dir", type=Path, default=Path("./lattice-bot-output"))
-    parser.add_argument("--n-strips", type=int, default=10,
+    parser.add_argument("--n-strips", type=int, default=20,
                         help="Number of strips in each dimension")
     parser.add_argument("--gap", type=int, default=6,
                         help="Gap width between strips in pixels (at 1024px short side)")
+    parser.add_argument("--warp-strength", type=float, default=0.4,
+                        help="Warp amplitude as fraction of cell size (0=straight)")
+    parser.add_argument("--warp-freq", type=float, default=2.0,
+                        help="Sine cycles across the image")
     parser.add_argument("--no-post", action="store_true")
     args = parser.parse_args()
 
@@ -112,7 +127,8 @@ def main():
     # Scale gap to output resolution
     res_scale = min(target_w, target_h) / 1024.0
     gap = max(2, int(args.gap * res_scale))
-    logger.info(f"Gap: {gap}px")
+    logger.info(f"Gap: {gap}px, strips: {args.n_strips}, "
+                f"warp: strength={args.warp_strength} freq={args.warp_freq}")
 
     img_a = np.array(images[0].resize((target_w, target_h), Image.LANCZOS))
     img_b = np.array(images[1].resize((target_w, target_h), Image.LANCZOS))
@@ -123,7 +139,9 @@ def main():
     output_paths = []
     for i, weave in enumerate(weaves):
         logger.info(f"Version {i + 1}: {weave} weave...")
-        result = make_lattice(img_a, img_b, img_c, args.n_strips, gap, weave)
+        result = make_organic_lattice(img_a, img_b, img_c, args.n_strips, gap, weave,
+                                      warp_strength=args.warp_strength,
+                                      warp_freq=args.warp_freq)
         dest = out_dir / f"lattice_result_{i + 1}_{weave}.png"
         Image.fromarray(result).save(dest)
         logger.info(f"Saved {dest.name}")
