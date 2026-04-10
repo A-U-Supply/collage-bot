@@ -2,11 +2,11 @@
 
 Fetches 3 images. For each image used as a stencil:
 
-  1. Burn the two fill images against each other to create burned fills:
-       b2 = color_burn(base=img_c, blend=img_b)  — burn b into c
-       c2 = color_burn(base=img_b, blend=img_c)  — burn c into b
+  1. Create burned and dodged fills from the two fill images:
+       b2 = color_burn(base=img_c, blend=img_b)   — darkened
+       c2 = color_dodge(base=img_p, blend=img_q)  — brightened (opposite of burn)
   2. Fill the stencil with b2 and c2 (two variations, swapped):
-       result_1: b2 in white regions, c2 in black regions
+       result_1: b2 (burned/dark) in white regions, c2 (dodged/bright) in black regions
        result_2: c2 in white regions, b2 in black regions
 
 Posts 6 images: 2 results per stencil × 3 stencils.
@@ -28,6 +28,14 @@ def color_burn(base: np.ndarray, blend: np.ndarray) -> np.ndarray:
     b = base.astype(np.float32) / 255.0
     s = blend.astype(np.float32) / 255.0
     result = 1.0 - np.clip((1.0 - b) / np.maximum(s, 1e-6), 0.0, 1.0)
+    return (result * 255.0).clip(0, 255).astype(np.uint8)
+
+
+def color_dodge(base: np.ndarray, blend: np.ndarray) -> np.ndarray:
+    """Color dodge blend mode — exact opposite of color burn. Returns uint8."""
+    b = base.astype(np.float32) / 255.0
+    s = blend.astype(np.float32) / 255.0
+    result = np.clip(b / np.maximum(1.0 - s, 1e-6), 0.0, 1.0)
     return (result * 255.0).clip(0, 255).astype(np.uint8)
 
 
@@ -83,9 +91,9 @@ def main():
         arr_p = np.array(img_p.convert("RGB"))
         arr_q = np.array(img_q.convert("RGB"))
 
-        b2 = Image.fromarray(color_burn(base=arr_q, blend=arr_p))  # burn p into q
-        c2 = Image.fromarray(color_burn(base=arr_p, blend=arr_q))  # burn q into p
-        logger.info(f"  Created b2 (burn {p+1} into {q+1}) and c2 (burn {q+1} into {p+1})")
+        b2 = Image.fromarray(color_burn(base=arr_q, blend=arr_p))   # darkened
+        c2 = Image.fromarray(color_dodge(base=arr_p, blend=arr_q))  # brightened
+        logger.info(f"  b2=burn({p+1} into {q+1}), c2=dodge({q+1} into {p+1})")
 
         # Two stencil variations using the burned fills
         result_1 = apply_stencil(mask, b2, c2)
