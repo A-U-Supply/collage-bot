@@ -1,8 +1,11 @@
 """Collage stencil burn bot.
 
 Fetches 3 images. For each image used as a stencil, generates two variations
-(images B and C swapped between white/black regions), then color-burns the two
-variations together into a single composite.
+(images B and C swapped between white/black regions), burns each against the
+other, then re-applies the original mask so the stencil boundaries remain sharp:
+
+  white region → color_burn(var_a, var_b)   (img_a base, img_b burn)
+  black region → color_burn(var_b, var_a)   (img_b base, img_a burn)
 
 Posts 9 images: 3 pairs of (var_a, var_b, burned_result), grouped by stencil.
 """
@@ -77,9 +80,15 @@ def main():
         var_b.save(var_b_path)
         logger.info(f"Saved {var_a_path.name}, {var_b_path.name}")
 
-        burned_arr = color_burn(np.array(var_a), np.array(var_b))
+        # Burn each variation against the other, then re-apply the original mask
+        # so stencil boundaries stay sharp and each region looks distinct.
+        burned_a_over_b = color_burn(np.array(var_a), np.array(var_b))
+        burned_b_over_a = color_burn(np.array(var_b), np.array(var_a))
+        burned = apply_stencil(mask,
+                               Image.fromarray(burned_a_over_b),
+                               Image.fromarray(burned_b_over_a))
         burned_path = out_dir / f"burn_result_{pair_num}.png"
-        Image.fromarray(burned_arr).save(burned_path)
+        burned.save(burned_path)
         logger.info(f"Saved {burned_path.name}")
 
         output_paths += [var_a_path, var_b_path, burned_path]
