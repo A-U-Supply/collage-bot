@@ -1,12 +1,12 @@
 """Collage stencil burn bot.
 
-Fetches 3 images. For each image used as a stencil:
+Fetches 4 images. Images 1–3 each take a turn as stencil. Image 4 is used as
+the burn/dodge layer applied to the two fill images:
 
-  1. Create burned and dodged fills from the two fill images:
-       b2 = color_burn(base=img_c, blend=img_b)   — darkened
-       c2 = color_dodge(base=img_p, blend=img_q)  — brightened (opposite of burn)
+  1. b2 = color_burn(base=img_p, blend=img_d)   — fill p darkened by image 4
+     c2 = color_dodge(base=img_q, blend=img_d)  — fill q brightened by image 4
   2. Fill the stencil with b2 and c2 (two variations, swapped):
-       result_1: b2 (burned/dark) in white regions, c2 (dodged/bright) in black regions
+       result_1: b2 in white regions, c2 in black regions
        result_2: c2 in white regions, b2 in black regions
 
 Posts 6 images: 2 results per stencil × 3 stencils.
@@ -62,14 +62,10 @@ def main():
     out_dir = args.output_dir / "output"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"Fetching 3 images from #{args.source_channel}...")
-    source_paths = list(fetch_random_images(token, args.source_channel, 3, source_dir))
+    logger.info(f"Fetching 4 images from #{args.source_channel}...")
+    source_paths = list(fetch_random_images(token, args.source_channel, 4, source_dir))
     images = [Image.open(p).convert("RGB") for p in source_paths]
-
-    # Resize all images to the largest dimensions
-    target_w, target_h = max((img.size for img in images), key=lambda s: s[0] * s[1])
-    images = [img.resize((target_w, target_h), Image.LANCZOS) for img in images]
-    logger.info(f"Working resolution: {target_w}×{target_h}")
+    logger.info(f"Source sizes: {[img.size for img in images]}")
 
     # Each image takes a turn as stencil; the other two are the fill images.
     # (s=stencil index, p=fill image "b", q=fill image "c")
@@ -86,14 +82,17 @@ def main():
 
         img_p = images[p]
         img_q = images[q]
+        img_d = images[3]  # 4th image is the burn/dodge layer
 
-        # Burn each fill image into the other to create b2 and c2
-        arr_p = np.array(img_p.convert("RGB"))
-        arr_q = np.array(img_q.convert("RGB"))
+        arr_p = np.array(img_p)
+        arr_q = np.array(img_q)
+        # Resize D to match each fill image before applying blend
+        arr_d_for_p = np.array(img_d.resize(img_p.size, Image.LANCZOS))
+        arr_d_for_q = np.array(img_d.resize(img_q.size, Image.LANCZOS))
 
-        b2 = Image.fromarray(color_burn(base=arr_q, blend=arr_p))   # darkened
-        c2 = Image.fromarray(color_dodge(base=arr_p, blend=arr_q))  # brightened
-        logger.info(f"  b2=burn({p+1} into {q+1}), c2=dodge({q+1} into {p+1})")
+        b2 = Image.fromarray(color_burn(base=arr_p, blend=arr_d_for_p))   # p darkened by D
+        c2 = Image.fromarray(color_dodge(base=arr_q, blend=arr_d_for_q))  # q brightened by D
+        logger.info(f"  b2=burn(img{p+1}, img4), c2=dodge(img{q+1}, img4)")
 
         # Two stencil variations using the burned fills
         result_1 = apply_stencil(mask, b2, c2)
