@@ -1,13 +1,15 @@
 """Collage stencil burn bot.
 
-Fetches 3 images. For each image used as a stencil, generates two variations
-(images B and C swapped between white/black regions), burns each against the
-other, then re-applies the original mask so the stencil boundaries remain sharp:
+Fetches 3 images. For each image used as a stencil:
 
-  white region → color_burn(var_a, var_b)   (img_a base, img_b burn)
-  black region → color_burn(var_b, var_a)   (img_b base, img_a burn)
+  1. Burn the two fill images against each other to create burned fills:
+       b2 = color_burn(base=img_c, blend=img_b)  — burn b into c
+       c2 = color_burn(base=img_b, blend=img_c)  — burn c into b
+  2. Fill the stencil with b2 and c2 (two variations, swapped):
+       result_1: b2 in white regions, c2 in black regions
+       result_2: c2 in white regions, b2 in black regions
 
-Posts 9 images: 3 pairs of (var_a, var_b, burned_result), grouped by stencil.
+Posts 6 images: 2 results per stencil × 3 stencils.
 """
 import argparse
 import logging
@@ -56,42 +58,46 @@ def main():
     source_paths = list(fetch_random_images(token, args.source_channel, 3, source_dir))
     images = [Image.open(p).convert("RGB") for p in source_paths]
 
-    # Each image takes a turn as stencil; the other two fill white/black regions.
-    # var_a: images[a] in white, images[b] in black
-    # var_b: images[b] in white, images[a] in black  (swapped)
-    # burned: color-burn(var_a, var_b)
-    pairs = [
+    # Resize all images to the largest dimensions
+    target_w, target_h = max((img.size for img in images), key=lambda s: s[0] * s[1])
+    images = [img.resize((target_w, target_h), Image.LANCZOS) for img in images]
+    logger.info(f"Working resolution: {target_w}×{target_h}")
+
+    # Each image takes a turn as stencil; the other two are the fill images.
+    # (s=stencil index, p=fill image "b", q=fill image "c")
+    triples = [
         (0, 1, 2),
         (1, 0, 2),
         (2, 0, 1),
     ]
 
     output_paths = []
-    for pair_num, (s, a, b) in enumerate(pairs, start=1):
-        logger.info(f"Pair {pair_num}: image {s + 1} as stencil...")
+    for stencil_num, (s, p, q) in enumerate(triples, start=1):
+        logger.info(f"Stencil {stencil_num}: image {s + 1} as stencil...")
         mask = make_stencil(images[s])
 
-        var_a = apply_stencil(mask, images[a], images[b])
-        var_b = apply_stencil(mask, images[b], images[a])
+        img_p = images[p]
+        img_q = images[q]
 
-        var_a_path = out_dir / f"burn_var_{pair_num}a.png"
-        var_b_path = out_dir / f"burn_var_{pair_num}b.png"
-        var_a.save(var_a_path)
-        var_b.save(var_b_path)
-        logger.info(f"Saved {var_a_path.name}, {var_b_path.name}")
+        # Burn each fill image into the other to create b2 and c2
+        arr_p = np.array(img_p.convert("RGB"))
+        arr_q = np.array(img_q.convert("RGB"))
 
-        # Burn each variation against the other, then re-apply the original mask
-        # so stencil boundaries stay sharp and each region looks distinct.
-        burned_a_over_b = color_burn(np.array(var_a), np.array(var_b))
-        burned_b_over_a = color_burn(np.array(var_b), np.array(var_a))
-        burned = apply_stencil(mask,
-                               Image.fromarray(burned_a_over_b),
-                               Image.fromarray(burned_b_over_a))
-        burned_path = out_dir / f"burn_result_{pair_num}.png"
-        burned.save(burned_path)
-        logger.info(f"Saved {burned_path.name}")
+        b2 = Image.fromarray(color_burn(base=arr_q, blend=arr_p))  # burn p into q
+        c2 = Image.fromarray(color_burn(base=arr_p, blend=arr_q))  # burn q into p
+        logger.info(f"  Created b2 (burn {p+1} into {q+1}) and c2 (burn {q+1} into {p+1})")
 
-        output_paths += [var_a_path, var_b_path, burned_path]
+        # Two stencil variations using the burned fills
+        result_1 = apply_stencil(mask, b2, c2)
+        result_2 = apply_stencil(mask, c2, b2)
+
+        path_1 = out_dir / f"burn_result_{stencil_num}a.png"
+        path_2 = out_dir / f"burn_result_{stencil_num}b.png"
+        result_1.save(path_1)
+        result_2.save(path_2)
+        logger.info(f"  Saved {path_1.name}, {path_2.name}")
+
+        output_paths += [path_1, path_2]
 
     if not args.no_post:
         post_collages(token, args.post_channel, output_paths,
