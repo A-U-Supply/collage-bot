@@ -1,14 +1,16 @@
 """Collage lattice bot.
 
-Fetches 3 images and weaves A and B into a lattice of strips with organic,
-wavy boundaries. C shows through the gaps between strips.
+Fetches 3 images and weaves them as strips — A, B, C each appear as warp and
+weft strips in a repeating cycle. Each strip has a sinusoidal path that S-curves
+as it passes over/under crossing strips (physical weave undulation). Gap is black.
+
 Produces 5 variations — one per weave structure:
 
 1. Plain      — 1×1 checkerboard
 2. Basket     — 2×2 block checkerboard
 3. Twill      — 2/2 diagonal stripes at 45°
 4. Herringbone — twill that mirrors at the centre column (chevron/V pattern)
-5. Satin      — mostly A, with B appearing at isolated scattered binding points
+5. Satin      — mostly warp, with weft appearing at isolated scattered binding points
 """
 import argparse
 import logging
@@ -23,97 +25,124 @@ logger = logging.getLogger(__name__)
 
 
 def make_organic_lattice(img_a: np.ndarray, img_b: np.ndarray, img_c: np.ndarray,
-                         n_strips: int, gap_px: float, weave: str,
-                         warp_strength: float = 0.4, warp_freq: float = 2.0) -> np.ndarray:
-    """Weave img_a and img_b into a lattice with wavy organic strip boundaries.
+                         n_strips: int, gap_px: float, weave: str) -> np.ndarray:
+    """Weave img_a, img_b, img_c as strips with physical over/under undulation.
 
     Args:
         img_a, img_b, img_c : (H, W, 3) uint8 arrays, same size
-        n_strips    : number of strips in each dimension
-        gap_px      : gap width in pixels (already resolution-scaled)
-        weave       : weave structure name
-        warp_strength : warp amplitude as fraction of cell size (0 = straight)
-        warp_freq   : number of sine cycles across the full image width/height
+        n_strips  : number of strips in each dimension
+        gap_px    : gap width in pixels between strips (already resolution-scaled)
+        weave     : weave structure name
     """
     h, w = img_a.shape[:2]
     xx = np.arange(w, dtype=np.float32)
     yy = np.arange(h, dtype=np.float32)
     xx, yy = np.meshgrid(xx, yy)
 
-    cell_size = min(h, w) / n_strips
-    amplitude = cell_size * warp_strength
+    col_pitch = w / n_strips
+    row_pitch = h / n_strips
+    strip_half_w = (col_pitch - gap_px) / 2.0
+    strip_half_h = (row_pitch - gap_px) / 2.0
 
-    # Warp effective coords — different phases so row and col warps look independent
-    y_eff = yy + amplitude * np.sin(2 * np.pi * warp_freq * xx / w)
-    x_eff = xx + amplitude * np.sin(2 * np.pi * warp_freq * yy / h + np.pi * 0.7)
+    if strip_half_w < 1 or strip_half_h < 1:
+        raise ValueError(f"Gap too large for {n_strips} strips at {w}×{h}")
 
-    row_period = h / n_strips
-    col_period = w / n_strips
+    # Physical undulation: each strip S-curves as it passes over/under crossing strips.
+    # Amplitude ~25% of strip half-width; period = 2 crossings (one over, one under).
+    undulate_amp_col = strip_half_w * 0.25
+    undulate_amp_row = strip_half_h * 0.25
+    undulate_period_col = 2.0 * row_pitch  # warp undulates at weft-crossing frequency
+    undulate_period_row = 2.0 * col_pitch  # weft undulates at warp-crossing frequency
 
-    y_frac = y_eff % row_period
-    x_frac = x_eff % col_period
+    def col_center(j_arr):
+        c = (j_arr.astype(np.float32) + 0.5) * col_pitch
+        phase = np.pi * j_arr
+        return c + undulate_amp_col * np.sin(2 * np.pi * yy / undulate_period_col + phase)
 
-    half_gap = gap_px / 2.0
-    in_gap = (y_frac < half_gap) | (y_frac > row_period - half_gap) \
-           | (x_frac < half_gap) | (x_frac > col_period - half_gap)
+    def row_center(i_arr):
+        c = (i_arr.astype(np.float32) + 0.5) * row_pitch
+        phase = np.pi * i_arr
+        return c + undulate_amp_row * np.sin(2 * np.pi * xx / undulate_period_row + phase)
 
-    row_idx = (y_eff / row_period).astype(np.int32).clip(0, n_strips - 1)
-    col_idx = (x_eff / col_period).astype(np.int32).clip(0, n_strips - 1)
+    # Col (warp) strip membership — check nearest strip and its neighbour
+    j  = (xx / col_pitch).astype(np.int32).clip(0, n_strips - 1)
+    j1 = (j + 1).clip(0, n_strips - 1)
+    dist_j  = np.abs(xx - col_center(j))
+    dist_j1 = np.abs(xx - col_center(j1))
+    in_j  = dist_j  <= strip_half_w
+    in_j1 = dist_j1 <= strip_half_w
+    both_col = in_j & in_j1
+    in_j [both_col] = dist_j [both_col] <= dist_j1[both_col]
+    in_j1[both_col] = ~in_j[both_col]
+    col_idx      = np.where(in_j1, j1, j)
+    in_col_strip = in_j | in_j1
+    dist_col     = np.where(in_j1, dist_j1, dist_j)  # distance from assigned strip center
+
+    # Row (weft) strip membership — same pattern, x↔y
+    i  = (yy / row_pitch).astype(np.int32).clip(0, n_strips - 1)
+    i1 = (i + 1).clip(0, n_strips - 1)
+    dist_i  = np.abs(yy - row_center(i))
+    dist_i1 = np.abs(yy - row_center(i1))
+    in_i  = dist_i  <= strip_half_h
+    in_i1 = dist_i1 <= strip_half_h
+    both_row = in_i & in_i1
+    in_i [both_row] = dist_i [both_row] <= dist_i1[both_row]
+    in_i1[both_row] = ~in_i[both_row]
+    row_idx      = np.where(in_i1, i1, i)
+    in_row_strip = in_i | in_i1
+    dist_row     = np.where(in_i1, dist_i1, dist_i)
+
+    # 3-image cycling assignment
+    # Col strips: 0→A, 1→B, 2→C  (by col_idx % 3)
+    # Row strips: 0→B, 1→C, 2→A  (offset by 1 for visual variety)
+    cm = col_idx[:, :, np.newaxis] % 3
+    col_img = np.where(cm == 0, img_a, np.where(cm == 1, img_b, img_c))
+    rm = row_idx[:, :, np.newaxis] % 3
+    row_img = np.where(rm == 0, img_b, np.where(rm == 1, img_c, img_a))
+
+    # Weave: use_col = True means col (warp) strip is on top at this crossing
     n = n_strips
-
     if weave == 'plain':
-        use_a = (row_idx + col_idx) % 2 == 0
+        use_col = (row_idx + col_idx) % 2 == 0
     elif weave == 'basket':
-        use_a = (row_idx // 2 + col_idx // 2) % 2 == 0
+        use_col = (row_idx // 2 + col_idx // 2) % 2 == 0
     elif weave == 'twill':
-        use_a = (row_idx + col_idx) % 4 >= 2
+        use_col = (row_idx + col_idx) % 4 >= 2
     elif weave == 'herringbone':
-        use_a = np.where(col_idx < n // 2,
-                         (row_idx + col_idx) % 4 >= 2,
-                         (row_idx + (n - 1 - col_idx)) % 4 >= 2)
+        use_col = np.where(col_idx < n // 2,
+                           (row_idx + col_idx) % 4 >= 2,
+                           (row_idx + (n - 1 - col_idx)) % 4 >= 2)
     elif weave == 'satin':
-        use_a = (col_idx - row_idx * 2) % 5 != 0
+        use_col = (col_idx - row_idx * 2) % 5 != 0
     else:
-        use_a = np.ones((h, w), dtype=bool)
+        use_col = np.ones((h, w), dtype=bool)
 
-    result = img_c.copy()
-    active = ~in_gap
-    result[active] = np.where(
-        use_a[active, np.newaxis],
-        img_a[active],
-        img_b[active]
+    # Composite: gap = black, col-only, row-only, crossing (weave-determined)
+    at_crossing = in_col_strip & in_row_strip
+    col_only    = in_col_strip & ~in_row_strip
+    row_only    = in_row_strip & ~in_col_strip
+
+    result = np.zeros((h, w, 3), dtype=np.uint8)
+    result[col_only] = col_img[col_only]
+    result[row_only] = row_img[row_only]
+    result[at_crossing] = np.where(
+        use_col[at_crossing, np.newaxis],
+        col_img[at_crossing],
+        row_img[at_crossing]
     )
 
-    # --- Over/under shadow ---
-    cell_h = row_period - gap_px
-    cell_w = col_period - gap_px
+    # Over/under shadow: darkens the over-strip near where the under-strip enters
+    shadow_decay = max(gap_px * 2.5, 4.0)
+    # col on top: under-strip (row) enters at row strip edges → shadow near those edges
+    shadow_col_on_top = (np.exp(-(strip_half_h - dist_row.clip(0, strip_half_h)) / shadow_decay)) * 0.45
+    # row on top: under-strip (col) enters at col strip edges → shadow near those edges
+    shadow_row_on_top = (np.exp(-(strip_half_w - dist_col.clip(0, strip_half_w)) / shadow_decay)) * 0.45
 
-    # Normalized position within the active cell region [0, 1]
-    cell_y = ((y_frac - half_gap) / cell_h).clip(0, 1)
-    cell_x = ((x_frac - half_gap) / cell_w).clip(0, 1)
-
-    # Physical pixel distance from each edge
-    dist_top    = cell_y * cell_h
-    dist_bottom = (1.0 - cell_y) * cell_h
-    dist_left   = cell_x * cell_w
-    dist_right  = (1.0 - cell_x) * cell_w
-
-    shadow_decay = max(gap_px * 3.0, 4.0)
-    shadow_strength = 0.45
-
-    # col on top → under-strip enters from top/bottom → darken those edges
-    shadow_col_on_top = (np.exp(-dist_top / shadow_decay) +
-                         np.exp(-dist_bottom / shadow_decay)) * shadow_strength
-
-    # row on top → under-strip enters from left/right → darken those edges
-    shadow_row_on_top = (np.exp(-dist_left / shadow_decay) +
-                         np.exp(-dist_right / shadow_decay)) * shadow_strength
-
-    shadow_map = np.where(use_a, shadow_col_on_top, shadow_row_on_top)
-    shadow_map = np.clip(shadow_map, 0.0, shadow_strength)
+    shadow_map = np.where(use_col, shadow_col_on_top, shadow_row_on_top)
+    shadow_map = np.clip(shadow_map, 0.0, 0.45)
 
     result_f = result.astype(np.float32)
-    result_f[active] *= (1.0 - shadow_map[active, np.newaxis])
+    result_f[at_crossing] *= (1.0 - shadow_map[at_crossing, np.newaxis])
     result = result_f.clip(0, 255).astype(np.uint8)
 
     return result
@@ -130,10 +159,6 @@ def main():
                         help="Number of strips in each dimension")
     parser.add_argument("--gap", type=int, default=6,
                         help="Gap width between strips in pixels (at 1024px short side)")
-    parser.add_argument("--warp-strength", type=float, default=0.4,
-                        help="Warp amplitude as fraction of cell size (0=straight)")
-    parser.add_argument("--warp-freq", type=float, default=2.0,
-                        help="Sine cycles across the image")
     parser.add_argument("--no-post", action="store_true")
     args = parser.parse_args()
 
@@ -160,8 +185,7 @@ def main():
     # Scale gap to output resolution
     res_scale = min(target_w, target_h) / 1024.0
     gap = max(2, int(args.gap * res_scale))
-    logger.info(f"Gap: {gap}px, strips: {args.n_strips}, "
-                f"warp: strength={args.warp_strength} freq={args.warp_freq}")
+    logger.info(f"Gap: {gap}px, strips: {args.n_strips}")
 
     img_a = np.array(images[0].resize((target_w, target_h), Image.LANCZOS))
     img_b = np.array(images[1].resize((target_w, target_h), Image.LANCZOS))
@@ -172,9 +196,7 @@ def main():
     output_paths = []
     for i, weave in enumerate(weaves):
         logger.info(f"Version {i + 1}: {weave} weave...")
-        result = make_organic_lattice(img_a, img_b, img_c, args.n_strips, gap, weave,
-                                      warp_strength=args.warp_strength,
-                                      warp_freq=args.warp_freq)
+        result = make_organic_lattice(img_a, img_b, img_c, args.n_strips, gap, weave)
         dest = out_dir / f"lattice_result_{i + 1}_{weave}.png"
         Image.fromarray(result).save(dest)
         logger.info(f"Saved {dest.name}")
