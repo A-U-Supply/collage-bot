@@ -37,10 +37,22 @@ def chaos_params(w: int, h: int, chaos: float) -> tuple:
     return n, min_r, max_r
 
 
-def apply_bullet_holes(img: Image.Image, chaos: float = 0.5) -> Image.Image:
-    """Cut circular sections at chaos-determined count/size, rotate, place back."""
+def apply_bullet_holes(img: Image.Image, chaos: float = 0.5,
+                       count: int = 0, size_frac: float = 0.0) -> Image.Image:
+    """Cut circular sections at chaos-determined count/size, rotate, place back.
+
+    count:     if > 0, overrides the chaos-derived hole count
+    size_frac: if > 0, overrides the chaos-derived radius as a fraction of
+               image width (e.g. 0.15 = 15% of width)
+    """
     w, h = img.size
     n, min_r, max_r = chaos_params(w, h, chaos)
+
+    if count > 0:
+        n = count
+    if size_frac > 0:
+        min_r = max_r = max(2, round(w * size_frac))
+
     logger.info(f"chaos={chaos:.2f} → {n} holes, radius {min_r}–{max_r}px")
 
     result = img.copy()
@@ -80,6 +92,10 @@ def main():
     parser.add_argument("--output-dir", type=Path, default=Path("./bullethole-bot-output"))
     parser.add_argument("--chaos", type=float, default=0.5,
                         help="0.0 = few large circles, 1.0 = many small circles")
+    parser.add_argument("--count", type=int, default=0,
+                        help="Number of circles (0 = derive from chaos)")
+    parser.add_argument("--size", type=float, default=0.0,
+                        help="Circle radius as fraction of image width, e.g. 0.15 (0 = derive from chaos)")
     parser.add_argument("--no-post", action="store_true")
     args = parser.parse_args()
 
@@ -100,7 +116,8 @@ def main():
     source_paths = list(fetch_random_images(token, args.source_channel, 1, source_dir))
     img = Image.open(source_paths[0]).convert("RGB")
 
-    result = apply_bullet_holes(img, chaos=args.chaos)
+    result = apply_bullet_holes(img, chaos=args.chaos,
+                                count=args.count, size_frac=args.size)
 
     dest = out_dir / "bullethole_result.png"
     result.save(dest)

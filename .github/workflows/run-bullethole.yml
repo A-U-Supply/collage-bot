@@ -12,6 +12,12 @@ on:
       chaos:
         description: 'Circle size and count (0.0 = few large, 1.0 = many small)'
         default: '0.5'
+      count:
+        description: 'Number of circles (0 = derive from chaos)'
+        default: '0'
+      size:
+        description: 'Circle radius as fraction of image width, e.g. 0.15 = 15% (0 = derive from chaos)'
+        default: '0'
 
 jobs:
   run:
@@ -33,4 +39,6 @@ jobs:
           python bullethole_bot.py \
             --source-channel "${{ inputs.source_channel }}" \
             --post-channel "${{ inputs.post_channel }}" \
-            --chaos "${{ inputs.chaos }}"
+            --chaos "${{ inputs.chaos }}" \
+            --count "${{ inputs.count }}" \
+            --size "${{ inputs.size }}"
