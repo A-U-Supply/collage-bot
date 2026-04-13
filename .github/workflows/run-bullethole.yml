@@ -18,6 +18,33 @@ on:
       size:
         description: 'Circle radius as fraction of image width, e.g. 0.15 = 15% (0 = derive from chaos)'
         default: '0'
+      placement:
+        description: 'Circle placement mode'
+        default: 'random'
+        type: choice
+        options:
+          - random
+          - grid
+          - hex
+          - radial
+      jitter:
+        description: 'Randomness added to structured placements (0.0 = exact, 1.0 = maximum)'
+        default: '0.0'
+      effect:
+        description: 'Effect applied inside each circle'
+        default: 'rotate'
+        type: choice
+        options:
+          - rotate
+          - invert
+          - blur
+          - grayscale
+          - pixelate
+          - fill_black
+          - fill_white
+      no_overlap:
+        description: 'Prevent circles from overlapping (true/false)'
+        default: 'false'
 
 jobs:
   run:
@@ -41,4 +68,8 @@ jobs:
             --post-channel "${{ inputs.post_channel }}" \
             --chaos "${{ inputs.chaos }}" \
             --count "${{ inputs.count }}" \
-            --size "${{ inputs.size }}"
+            --size "${{ inputs.size }}" \
+            --placement "${{ inputs.placement }}" \
+            --jitter "${{ inputs.jitter }}" \
+            --effect "${{ inputs.effect }}" \
+            ${{ inputs.no_overlap == 'true' && '--no-overlap' || '' }}
