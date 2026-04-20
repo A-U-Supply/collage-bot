@@ -35,7 +35,6 @@ _CHAR_RANGES = [
     (0x3040, 0x309F),  # Hiragana
     (0x30A0, 0x30FF),  # Katakana
     (0x2500, 0x257F),  # Box Drawing
-    (0x2580, 0x259F),  # Block Elements
     (0x25A0, 0x25FF),  # Geometric Shapes
     (0x2200, 0x22FF),  # Mathematical Operators
     (0x2600, 0x26FF),  # Miscellaneous Symbols
