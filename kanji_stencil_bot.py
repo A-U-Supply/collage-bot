@@ -47,7 +47,7 @@ _SUPERSAMPLE = 4         # atlas and canvas render scale for crisper glyphs
 _DOG_SIGMA1 = 2.0
 _DOG_SIGMA2 = 3.2          # sigma1 × 1.6
 _DOG_THRESHOLD = 1.0       # DoG value to count a pixel as an edge
-_EDGE_TILE_THRESHOLD = 6   # min edge pixels in tile to use edge mode
+_EDGE_TILE_FRACTION = 0.12  # fraction of cell pixels that must be edges for edge mode
 
 # ── Font paths ──────────────────────────────────────────────────────────────
 _FONT_PATHS = [
@@ -66,13 +66,16 @@ def _load_font(font_size: int):
     return ImageFont.load_default()
 
 
-def _build_bucket_atlas(chars: str, font_size: int, cell_w: int, cell_h: int):
+def _build_bucket_atlas(chars: str, font_size: int, cell_w: int, cell_h: int,
+                        binarize: bool = True):
     """Render a small set of characters to a float32 atlas.
 
-    Renders at _SUPERSAMPLE× size then downsamples + binarizes for crisp patches.
+    Renders at _SUPERSAMPLE× size then downsamples. When binarize=True (edge chars),
+    result is thresholded to 0/255 for crisp lines. When binarize=False (fill chars),
+    anti-aliased values are kept so density info is preserved for MSE matching.
 
     Returns (atlas, char_list):
-        atlas:     (N, cell_h, cell_w) float32 — binarized (0 or 255)
+        atlas:     (N, cell_h, cell_w) float32
         char_list: list of N chars
     """
     big_font = _load_font(font_size * _SUPERSAMPLE)
@@ -92,7 +95,8 @@ def _build_bucket_atlas(chars: str, font_size: int, cell_w: int, cell_h: int):
         d.text((x, y), ch, fill=255, font=big_font)
         small = patch.resize((cell_w, cell_h), Image.LANCZOS)
         arr = np.array(small, dtype=np.float32)
-        arr = (arr > 127).astype(np.float32) * 255.0
+        if binarize:
+            arr = (arr > 127).astype(np.float32) * 255.0
         patches.append(arr)
         char_list.append(ch)
     return np.stack(patches, axis=0), char_list
@@ -134,12 +138,14 @@ def make_ascii_stencil(img: Image.Image, char_height: float = 0.03) -> Image.Ima
     rows = max(1, h // cell_h)
     logger.info(f"Grid: {cols}×{rows} cells at {cell_w}×{cell_h}px, font_size={font_size}px")
 
-    # Build per-bucket atlases (small, fast)
+    # Build per-bucket atlases: edge chars binarized, fill chars anti-aliased
+    edge_tile_threshold = max(6, int(cell_h * cell_w * _EDGE_TILE_FRACTION))
+    logger.info(f"Edge tile threshold: {edge_tile_threshold}px ({_EDGE_TILE_FRACTION:.0%} of {cell_h*cell_w}px cell)")
     dir_atlases = {
-        d: _build_bucket_atlas(chars, font_size, cell_w, cell_h)
+        d: _build_bucket_atlas(chars, font_size, cell_w, cell_h, binarize=True)
         for d, chars in _DIR_CHARS.items()
     }
-    fill_atlas, fill_chars = _build_bucket_atlas(_FILL_CHARS, font_size, cell_w, cell_h)
+    fill_atlas, fill_chars = _build_bucket_atlas(_FILL_CHARS, font_size, cell_w, cell_h, binarize=False)
 
     # ── Edge detection (whole image) ────────────────────────────────────────
     gray = np.array(img.convert("L"), dtype=np.float32)
@@ -187,7 +193,7 @@ def make_ascii_stencil(img: Image.Image, char_height: float = 0.03) -> Image.Ima
 
             # Vote on dominant edge direction in this tile
             dominant_dir = -1
-            if cell_edges.sum() >= _EDGE_TILE_THRESHOLD:
+            if cell_edges.sum() >= edge_tile_threshold:
                 counts = np.bincount(
                     cell_dirs[cell_dirs >= 0].flatten(), minlength=4
                 )
