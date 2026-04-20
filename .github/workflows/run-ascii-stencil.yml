@@ -9,9 +9,9 @@ on:
       post_channel:
         description: 'Channel to post results to'
         default: 'img-junkyard'
-      font_size:
-        description: 'Character cell height in pixels (smaller = finer detail, larger = blockier)'
-        default: '12'
+      char_height:
+        description: 'Character height as fraction of image height (e.g. 0.02 = 2%, smaller = finer)'
+        default: '0.02'
 
 jobs:
   run:
@@ -35,4 +35,4 @@ jobs:
           python ascii_stencil_bot.py \
             --source-channel "${{ inputs.source_channel }}" \
             --post-channel "${{ inputs.post_channel }}" \
-            --font-size "${{ inputs.font_size }}"
+            --char-height "${{ inputs.char_height }}"

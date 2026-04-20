@@ -6,7 +6,7 @@ Generates 6 composites (all permutations of stencil/fill pair) plus the
 3 ASCII stencil masks — 9 images total. Posts to img-junkyard.
 
 Dark source pixels → dense characters (white text), bright pixels → spaces (black).
-Font size controls detail level: smaller = finer grid, larger = blockier look.
+char_height controls detail level: smaller fraction = finer grid, larger = blockier look.
 """
 import argparse
 import logging
@@ -38,12 +38,14 @@ def _load_font(font_size: int):
     return ImageFont.load_default()
 
 
-def make_ascii_stencil(img: Image.Image, font_size: int = 12) -> Image.Image:
+def make_ascii_stencil(img: Image.Image, char_height: float = 0.02) -> Image.Image:
     """Convert image to ASCII art: white characters on black background.
 
     Dark source pixels map to dense characters; bright pixels map to spaces.
+    char_height is a fraction of the image height (e.g. 0.02 = 2%).
     Returns an RGB image resized to the original input dimensions.
     """
+    font_size = max(4, round(img.height * char_height))
     font = _load_font(font_size)
 
     # Measure cell dimensions from the font
@@ -87,8 +89,8 @@ def main():
     parser.add_argument("--source-channel", default="image-gen")
     parser.add_argument("--post-channel", default="img-junkyard")
     parser.add_argument("--output-dir", type=Path, default=Path("./ascii-stencil-bot-output"))
-    parser.add_argument("--font-size", type=int, default=12,
-                        help="Character cell height in pixels (smaller = finer detail)")
+    parser.add_argument("--char-height", type=float, default=0.02,
+                        help="Character height as fraction of image height (e.g. 0.02 = 2%%)")
     parser.add_argument("--no-post", action="store_true")
     args = parser.parse_args()
 
@@ -113,8 +115,8 @@ def main():
     masks = []
     mask_paths = []
     for i, img in enumerate(images):
-        logger.info(f"Generating ASCII stencil {i + 1}/3 (font_size={args.font_size})...")
-        ascii_img = make_ascii_stencil(img, font_size=args.font_size)
+        logger.info(f"Generating ASCII stencil {i + 1}/3 (char_height={args.char_height})...")
+        ascii_img = make_ascii_stencil(img, char_height=args.char_height)
         mask = make_stencil(ascii_img)
         mask_rgb = mask.convert("RGB")
         dest = out_dir / f"ascii_mask_{i + 1}.png"
