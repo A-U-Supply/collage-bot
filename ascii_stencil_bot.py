@@ -19,14 +19,15 @@ from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger(__name__)
 
-# Character ramp: index 0 = darkest source → dense char, index -1 = brightest → space
-_RAMP = "@#%$&8B0Ooa*+;:,. "
+# Character ramp ordered by visual ink density (complex → simple → space).
+# Dark source pixels → complex/dense CJK character; bright pixels → space.
+_RAMP = "鬱藏疆赢德意道常高重明来目日木人一 "
 
 _FONT_PATHS = [
-    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",  # Ubuntu CI
-    "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
-    "/System/Library/Fonts/Menlo.ttc",                       # macOS
-    "/System/Library/Fonts/Monaco.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",   # Ubuntu CI (fonts-noto-cjk)
+    "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+    "/System/Library/Fonts/PingFang.ttc",                        # macOS
+    "/System/Library/Fonts/STHeiti Light.ttc",
 ]
 
 
