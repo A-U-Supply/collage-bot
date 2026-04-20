@@ -1,22 +1,20 @@
-"""Collage stencil ASCII bot.
+"""Collage stencil ASCII/CJK bot.
 
-Fetches 3 images from Slack and converts each to a character art rendering
+Fetches 3 images from Slack and converts each to a CJK character art rendering
 used as a binary stencil mask. Generates 6 composites plus 3 stencil masks
 (9 images total). Posts to img-junkyard.
 
-For each image cell:
-  1. Tonal bracket: cells mean brightness is used to filter the character set
-     to only candidates whose visual fill is in the same brightness range.
-  2. Template matching: within that bracket, the character whose rendered
-     pixel pattern best matches the image cell (lowest MSE) is selected.
-  3. Inversion: both white-on-black and black-on-white versions of each
-     character are candidates. The rendering switches per cell based on
-     which version wins the MSE match.
+Algorithm (based on AcerolaFX ASCII shader):
+  For each image tile (cell):
+  1. Compute Difference of Gaussians edge map + Sobel gradient direction
+  2. Vote on dominant edge direction within the tile
+  3. EDGE MODE (strong edge present): pick a CJK character from the
+     directional bucket matching that edge angle (vertical/horizontal/diagonal)
+  4. FILL MODE (no dominant edge): pick a CJK character from a density
+     ramp based on mean tile luminance
+  5. Both modes: consider white-on-black vs black-on-white, pick lowest MSE
 
-Character set is built from CJK ideographs (sampled across U+4E00–U+9FFF),
-CJK punctuation, hiragana, katakana, box drawing, block elements, geometric
-shapes, math operators, and fullwidth symbols — filtered to those that
-actually render with the loaded font.
+char_height controls grid detail: smaller fraction = finer grid, larger = blockier.
 """
 import argparse
 import logging
@@ -24,30 +22,36 @@ import os
 import sys
 from pathlib import Path
 
+import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger(__name__)
 
-# Unicode ranges to include in character set
-_CHAR_RANGES = [
-    (0x3000, 0x303F),  # CJK Punctuation
-    (0x3040, 0x309F),  # Hiragana
-    (0x30A0, 0x30FF),  # Katakana
-    (0x2500, 0x257F),  # Box Drawing
-    (0x25A0, 0x25FF),  # Geometric Shapes
-    (0x2200, 0x22FF),  # Mathematical Operators
-    (0x2600, 0x26FF),  # Miscellaneous Symbols
-    (0xFF01, 0xFF5E),  # Fullwidth Latin / Symbols
-]
-_CJK_SAMPLE_STEP = 10    # sample every Nth ideograph from U+4E00–U+9FFF
-_TONAL_TOLERANCE = 64    # brightness bracket half-width (out of 255)
-_ATLAS_CHUNK = 128       # chars per MSE broadcast chunk (memory control)
+# ── Character sets ─────────────────────────────────────────────────────────
 
+# Edge characters: curated CJK by dominant visual stroke direction
+_DIR_CHARS = {
+    0: "丨川目月王田由甲申",    # vertical strokes   ( | )
+    1: "一二三王土士干亘工",    # horizontal strokes ( ─ )
+    2: "乙乃之ノ个彡勿",        # diagonal  /  (lower-left → upper-right)
+    3: "入人大太父文又",        # diagonal  \  (upper-left → lower-right)
+}
+
+# Fill characters: CJK ordered by visual ink density (dense → sparse → space)
+_FILL_CHARS = "鬱藏疆赢德意道常高重明来目日木人一 "
+
+# ── Tunable constants ───────────────────────────────────────────────────────
+_DOG_SIGMA1 = 2.0
+_DOG_SIGMA2 = 3.2          # sigma1 × 1.6
+_DOG_THRESHOLD = 1.0       # DoG value to count a pixel as an edge
+_EDGE_TILE_THRESHOLD = 6   # min edge pixels in tile to use edge mode
+
+# ── Font paths ──────────────────────────────────────────────────────────────
 _FONT_PATHS = [
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",   # Ubuntu CI
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
-    "/System/Library/Fonts/PingFang.ttc",                        # macOS
+    "/System/Library/Fonts/PingFang.ttc",
     "/System/Library/Fonts/STHeiti Light.ttc",
 ]
 
@@ -60,25 +64,16 @@ def _load_font(font_size: int):
     return ImageFont.load_default()
 
 
-def _build_glyph_atlas(font, cell_w: int, cell_h: int):
-    """Render all candidate characters and return those with visible pixels.
+def _build_bucket_atlas(chars: str, font, cell_w: int, cell_h: int):
+    """Render a small set of characters to a float32 atlas.
 
-    Returns:
-        atlas:      float32 array (N, cell_h, cell_w), white char on black
-        char_list:  list of N characters
-        fill_means: float32 array (N,) — mean pixel value per glyph (0–255)
+    Returns (atlas, char_list):
+        atlas:     (N, cell_h, cell_w) float32
+        char_list: list of N chars
     """
-    candidates = []
-    for start, end in _CHAR_RANGES:
-        candidates.extend(chr(cp) for cp in range(start, end + 1))
-    for cp in range(0x4E00, 0x9FFF, _CJK_SAMPLE_STEP):
-        candidates.append(chr(cp))
-    candidates.append(" ")
-
     probe = ImageDraw.Draw(Image.new("L", (cell_w * 2, cell_h * 2)))
-    patches, char_list, fill_means = [], [], []
-
-    for ch in candidates:
+    patches, char_list = [], []
+    for ch in chars:
         patch = Image.new("L", (cell_w, cell_h), 0)
         d = ImageDraw.Draw(patch)
         try:
@@ -88,26 +83,30 @@ def _build_glyph_atlas(font, cell_w: int, cell_h: int):
         except Exception:
             x, y = 0, 0
         d.text((x, y), ch, fill=255, font=font)
-        arr = np.array(patch, dtype=np.float32)
-        mean = arr.mean()
-        # Skip glyphs the font can't render (tofu = near-zero pixels), keep space
-        if mean < 1.0 and ch != " ":
-            continue
-        patches.append(arr)
+        patches.append(np.array(patch, dtype=np.float32))
         char_list.append(ch)
-        fill_means.append(mean)
-
-    atlas = np.stack(patches, axis=0)
-    return atlas, char_list, np.array(fill_means, dtype=np.float32)
+    return np.stack(patches, axis=0), char_list
 
 
-def make_ascii_stencil(img: Image.Image, char_height: float = 0.02) -> Image.Image:
-    """Convert image to character art using tonal bracketing + template matching.
+def _best_match(cell: np.ndarray, atlas: np.ndarray, char_list: list):
+    """Return (char, inverted) with lowest MSE against cell.
 
-    For each cell, the character (and inversion) whose rendered pixel pattern
-    best matches the image cell within its tonal bracket is selected.
-    Inverted cells (black char on white background) are candidates alongside
-    normal (white char on black), allowing the rendering to switch per cell.
+    Considers both normal (white-on-black) and inverted (black-on-white).
+    """
+    atlas_inv = 255.0 - atlas
+    # MSE normal and inverted
+    mse_n = ((atlas - cell[np.newaxis]) ** 2).mean(axis=(1, 2))
+    mse_i = ((atlas_inv - cell[np.newaxis]) ** 2).mean(axis=(1, 2))
+    best_n = int(np.argmin(mse_n))
+    best_i = int(np.argmin(mse_i))
+    if mse_n[best_n] <= mse_i[best_i]:
+        return char_list[best_n], False
+    else:
+        return char_list[best_i], True
+
+
+def make_ascii_stencil(img: Image.Image, char_height: float = 0.03) -> Image.Image:
+    """Convert image to CJK character art using AcerolaFX-style tile algorithm.
 
     char_height: fraction of image height per character row (e.g. 0.03 = 3%)
     Returns an RGB image resized to original input dimensions.
@@ -115,7 +114,6 @@ def make_ascii_stencil(img: Image.Image, char_height: float = 0.02) -> Image.Ima
     font_size = max(4, round(img.height * char_height))
     font = _load_font(font_size)
 
-    # Cell size: CJK characters are square, so cell_w ≈ font_size
     probe_draw = ImageDraw.Draw(Image.new("L", (1, 1)))
     bbox = probe_draw.textbbox((0, 0), "一", font=font)
     cell_w = max(1, bbox[2])
@@ -124,97 +122,83 @@ def make_ascii_stencil(img: Image.Image, char_height: float = 0.02) -> Image.Ima
     w, h = img.size
     cols = max(1, w // cell_w)
     rows = max(1, h // cell_h)
+    logger.info(f"Grid: {cols}×{rows} cells at {cell_w}×{cell_h}px, font_size={font_size}px")
 
-    logger.info(f"Building glyph atlas (font_size={font_size}px)...")
-    atlas, char_list, fill_means = _build_glyph_atlas(font, cell_w, cell_h)
-    N = len(char_list)
-    logger.info(f"Atlas: {N} valid characters")
-    logger.info(f"Grid: {cols}×{rows} cells at {cell_w}×{cell_h}px")
+    # Build per-bucket atlases (small, fast)
+    dir_atlases = {
+        d: _build_bucket_atlas(chars, font, cell_w, cell_h)
+        for d, chars in _DIR_CHARS.items()
+    }
+    fill_atlas, fill_chars = _build_bucket_atlas(_FILL_CHARS, font, cell_w, cell_h)
 
-    # Extend atlas with inverted versions (black char on white background)
-    # Indices 0..N-1 = normal, N..2N-1 = inverted
-    atlas_inv = 255.0 - atlas
-    fill_means_inv = 255.0 - fill_means
-    atlas_all = np.concatenate([atlas, atlas_inv], axis=0)       # (2N, H, W)
-    fill_means_all = np.concatenate([fill_means, fill_means_inv]) # (2N,)
-
-    # Grayscale source as float32, trimmed to exact grid
+    # ── Edge detection (whole image) ────────────────────────────────────────
     gray = np.array(img.convert("L"), dtype=np.float32)
+
+    blur1 = cv2.GaussianBlur(gray, (0, 0), sigmaX=_DOG_SIGMA1)
+    blur2 = cv2.GaussianBlur(gray, (0, 0), sigmaX=_DOG_SIGMA2)
+    dog = blur1 - blur2
+    edge_map = (dog > _DOG_THRESHOLD).astype(np.uint8)  # 1 where edge
+
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    magnitude = np.sqrt(gx ** 2 + gy ** 2)
+    angle = np.arctan2(gy, gx)   # [-π, π]
+
+    # Quantize angle → direction index (0–3) per pixel; -1 = no edge
+    abs_norm = np.abs(angle) / np.pi   # [0, 1]
+    direction_map = np.full(gray.shape, -1, dtype=np.int8)
+    valid = magnitude > 1.0
+    direction_map[valid & ((abs_norm < 0.05) | (abs_norm > 0.95))] = 0   # vertical
+    direction_map[valid & ((abs_norm > 0.45) & (abs_norm < 0.55))] = 1   # horizontal
+    direction_map[valid & (abs_norm >= 0.05) & (abs_norm <= 0.45) & (angle > 0)] = 2  # /
+    direction_map[valid & (abs_norm >= 0.05) & (abs_norm <= 0.45) & (angle < 0)] = 3  # \
+    direction_map[valid & (abs_norm >= 0.55) & (abs_norm <= 0.95) & (angle > 0)] = 3  # \
+    direction_map[valid & (abs_norm >= 0.55) & (abs_norm <= 0.95) & (angle < 0)] = 2  # /
+
+    # Trim to grid
     gray_trimmed = gray[:rows * cell_h, :cols * cell_w]
-    # Reshape to (rows, cols, cell_h, cell_w)
-    cells_all = gray_trimmed.reshape(rows, cell_h, cols, cell_w).transpose(0, 2, 1, 3)
+    edge_trimmed = edge_map[:rows * cell_h, :cols * cell_w]
+    dir_trimmed = direction_map[:rows * cell_h, :cols * cell_w]
+
+    cells_gray = gray_trimmed.reshape(rows, cell_h, cols, cell_w).transpose(0, 2, 1, 3)
+    cells_edge = edge_trimmed.reshape(rows, cell_h, cols, cell_w).transpose(0, 2, 1, 3)
+    cells_dir = dir_trimmed.reshape(rows, cell_h, cols, cell_w).transpose(0, 2, 1, 3)
 
     canvas = Image.new("RGB", (cols * cell_w, rows * cell_h), (0, 0, 0))
     draw = ImageDraw.Draw(canvas)
-    two_n = 2 * N
 
     for r in range(rows):
-        row_cells = cells_all[r]                          # (cols, H, W)
-        cell_means = row_cells.mean(axis=(1, 2))          # (cols,)
+        for c in range(cols):
+            cell = cells_gray[r, c]       # (cell_h, cell_w)
+            cell_edges = cells_edge[r, c]
+            cell_dirs = cells_dir[r, c]
 
-        best_mse = np.full(cols, np.inf)
-        best_global_idx = np.zeros(cols, dtype=int)
+            # Vote on dominant edge direction in this tile
+            dominant_dir = -1
+            if cell_edges.sum() >= _EDGE_TILE_THRESHOLD:
+                counts = np.bincount(
+                    cell_dirs[cell_dirs >= 0].flatten(), minlength=4
+                )
+                if counts.max() > 0:
+                    dominant_dir = int(counts.argmax())
 
-        # Process atlas in chunks to keep memory bounded
-        for chunk_start in range(0, two_n, _ATLAS_CHUNK):
-            chunk_end = min(chunk_start + _ATLAS_CHUNK, two_n)
-            chunk_atlas = atlas_all[chunk_start:chunk_end]    # (C, H, W)
-            chunk_fills = fill_means_all[chunk_start:chunk_end]  # (C,)
+            if dominant_dir >= 0:
+                atlas, chars = dir_atlases[dominant_dir]
+            else:
+                atlas, chars = fill_atlas, fill_chars
 
-            # Tonal mask: only consider chars whose fill is close to cell mean
-            tonal_dist = np.abs(
-                cell_means[:, np.newaxis] - chunk_fills[np.newaxis, :]
-            )  # (cols, C)
-            in_bracket = tonal_dist < _TONAL_TOLERANCE
-
-            # MSE for all (col, chunk_char) pairs
-            diffs = (
-                (row_cells[:, np.newaxis, :, :] - chunk_atlas[np.newaxis, :, :, :]) ** 2
-            ).mean(axis=(2, 3))  # (cols, C)
-
-            diffs[~in_bracket] = np.inf
-
-            chunk_min_mse = diffs.min(axis=1)               # (cols,)
-            chunk_min_local = np.argmin(diffs, axis=1)      # (cols,)
-
-            improve = chunk_min_mse < best_mse
-            best_mse[improve] = chunk_min_mse[improve]
-            best_global_idx[improve] = chunk_start + chunk_min_local[improve]
-
-        # Fallback: if tonal bracket matched nothing, use global best
-        no_match = np.isinf(best_mse)
-        if no_match.any():
-            for chunk_start in range(0, two_n, _ATLAS_CHUNK):
-                chunk_end = min(chunk_start + _ATLAS_CHUNK, two_n)
-                chunk_atlas = atlas_all[chunk_start:chunk_end]
-                diffs = (
-                    (row_cells[no_match][:, np.newaxis, :, :] -
-                     chunk_atlas[np.newaxis, :, :, :]) ** 2
-                ).mean(axis=(2, 3))
-                chunk_min = diffs.min(axis=1)
-                chunk_idx = np.argmin(diffs, axis=1)
-                cols_idx = np.where(no_match)[0]
-                improve = chunk_min < best_mse[cols_idx]
-                upd = cols_idx[improve]
-                best_mse[upd] = chunk_min[improve]
-                best_global_idx[upd] = chunk_start + chunk_idx[improve]
-
-        # Render each cell
-        for c, idx in enumerate(best_global_idx):
-            ch = char_list[idx % N]
-            inverted = idx >= N
+            ch, inverted = _best_match(cell, atlas, chars)
 
             if inverted:
-                # White background, black character
                 draw.rectangle(
-                    [c * cell_w, r * cell_h, (c + 1) * cell_w - 1, (r + 1) * cell_h - 1],
+                    [c * cell_w, r * cell_h,
+                     (c + 1) * cell_w - 1, (r + 1) * cell_h - 1],
                     fill=(255, 255, 255),
                 )
                 if ch != " ":
                     draw.text((c * cell_w, r * cell_h), ch,
                               fill=(0, 0, 0), font=font)
             elif ch != " ":
-                # Black background (default), white character
                 draw.text((c * cell_w, r * cell_h), ch,
                           fill=(255, 255, 255), font=font)
 
@@ -224,11 +208,11 @@ def make_ascii_stencil(img: Image.Image, char_height: float = 0.02) -> Image.Ima
 def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    parser = argparse.ArgumentParser(description="Collage stencil ASCII bot")
+    parser = argparse.ArgumentParser(description="Collage stencil CJK bot")
     parser.add_argument("--source-channel", default="image-gen")
     parser.add_argument("--post-channel", default="img-junkyard")
     parser.add_argument("--output-dir", type=Path, default=Path("./ascii-stencil-bot-output"))
-    parser.add_argument("--char-height", type=float, default=0.02,
+    parser.add_argument("--char-height", type=float, default=0.03,
                         help="Character height as fraction of image height (e.g. 0.03 = 3%%)")
     parser.add_argument("--no-post", action="store_true")
     args = parser.parse_args()
