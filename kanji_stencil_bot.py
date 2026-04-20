@@ -32,16 +32,18 @@ logger = logging.getLogger(__name__)
 
 # Edge characters: curated CJK by dominant visual stroke direction
 _DIR_CHARS = {
-    0: "丨川目月王田由甲申",    # vertical strokes   ( | )
-    1: "一二三王土士干亘工",    # horizontal strokes ( ─ )
-    2: "乙乃之ノ个彡勿",        # diagonal  /  (lower-left → upper-right)
-    3: "入人大太父文又",        # diagonal  \  (upper-left → lower-right)
+    0: "│┃║╎╏┆┇",   # vertical   ( | )
+    1: "─━═╌╍┄┅",   # horizontal ( ─ )
+    2: "╱",           # diagonal  /
+    3: "╲",           # diagonal  \
 }
 
 # Fill characters: CJK ordered by visual ink density (dense → sparse → space)
 _FILL_CHARS = "鬱藏疆赢德意道常高重明来目日木人一 "
 
 # ── Tunable constants ───────────────────────────────────────────────────────
+_SUPERSAMPLE = 4         # atlas and canvas render scale for crisper glyphs
+
 _DOG_SIGMA1 = 2.0
 _DOG_SIGMA2 = 3.2          # sigma1 × 1.6
 _DOG_THRESHOLD = 1.0       # DoG value to count a pixel as an edge
@@ -64,26 +66,34 @@ def _load_font(font_size: int):
     return ImageFont.load_default()
 
 
-def _build_bucket_atlas(chars: str, font, cell_w: int, cell_h: int):
+def _build_bucket_atlas(chars: str, font_size: int, cell_w: int, cell_h: int):
     """Render a small set of characters to a float32 atlas.
 
+    Renders at _SUPERSAMPLE× size then downsamples + binarizes for crisp patches.
+
     Returns (atlas, char_list):
-        atlas:     (N, cell_h, cell_w) float32
+        atlas:     (N, cell_h, cell_w) float32 — binarized (0 or 255)
         char_list: list of N chars
     """
-    probe = ImageDraw.Draw(Image.new("L", (cell_w * 2, cell_h * 2)))
+    big_font = _load_font(font_size * _SUPERSAMPLE)
+    bw = cell_w * _SUPERSAMPLE
+    bh = cell_h * _SUPERSAMPLE
+    probe = ImageDraw.Draw(Image.new("L", (bw * 2, bh * 2)))
     patches, char_list = [], []
     for ch in chars:
-        patch = Image.new("L", (cell_w, cell_h), 0)
+        patch = Image.new("L", (bw, bh), 0)
         d = ImageDraw.Draw(patch)
         try:
-            bbox = probe.textbbox((0, 0), ch, font=font)
-            x = (cell_w - (bbox[2] - bbox[0])) // 2 - bbox[0]
-            y = (cell_h - (bbox[3] - bbox[1])) // 2 - bbox[1]
+            bbox = probe.textbbox((0, 0), ch, font=big_font)
+            x = (bw - (bbox[2] - bbox[0])) // 2 - bbox[0]
+            y = (bh - (bbox[3] - bbox[1])) // 2 - bbox[1]
         except Exception:
             x, y = 0, 0
-        d.text((x, y), ch, fill=255, font=font)
-        patches.append(np.array(patch, dtype=np.float32))
+        d.text((x, y), ch, fill=255, font=big_font)
+        small = patch.resize((cell_w, cell_h), Image.LANCZOS)
+        arr = np.array(small, dtype=np.float32)
+        arr = (arr > 127).astype(np.float32) * 255.0
+        patches.append(arr)
         char_list.append(ch)
     return np.stack(patches, axis=0), char_list
 
@@ -126,10 +136,10 @@ def make_ascii_stencil(img: Image.Image, char_height: float = 0.03) -> Image.Ima
 
     # Build per-bucket atlases (small, fast)
     dir_atlases = {
-        d: _build_bucket_atlas(chars, font, cell_w, cell_h)
+        d: _build_bucket_atlas(chars, font_size, cell_w, cell_h)
         for d, chars in _DIR_CHARS.items()
     }
-    fill_atlas, fill_chars = _build_bucket_atlas(_FILL_CHARS, font, cell_w, cell_h)
+    fill_atlas, fill_chars = _build_bucket_atlas(_FILL_CHARS, font_size, cell_w, cell_h)
 
     # ── Edge detection (whole image) ────────────────────────────────────────
     gray = np.array(img.convert("L"), dtype=np.float32)
@@ -164,7 +174,9 @@ def make_ascii_stencil(img: Image.Image, char_height: float = 0.03) -> Image.Ima
     cells_edge = edge_trimmed.reshape(rows, cell_h, cols, cell_w).transpose(0, 2, 1, 3)
     cells_dir = dir_trimmed.reshape(rows, cell_h, cols, cell_w).transpose(0, 2, 1, 3)
 
-    canvas = Image.new("RGB", (cols * cell_w, rows * cell_h), (0, 0, 0))
+    SS = _SUPERSAMPLE
+    big_font = _load_font(font_size * SS)
+    canvas = Image.new("RGB", (cols * cell_w * SS, rows * cell_h * SS), (0, 0, 0))
     draw = ImageDraw.Draw(canvas)
 
     for r in range(rows):
@@ -189,18 +201,20 @@ def make_ascii_stencil(img: Image.Image, char_height: float = 0.03) -> Image.Ima
 
             ch, inverted = _best_match(cell, atlas, chars)
 
+            x0, y0 = c * cell_w * SS, r * cell_h * SS
+            x1, y1 = (c + 1) * cell_w * SS - 1, (r + 1) * cell_h * SS - 1
             if inverted:
-                draw.rectangle(
-                    [c * cell_w, r * cell_h,
-                     (c + 1) * cell_w - 1, (r + 1) * cell_h - 1],
-                    fill=(255, 255, 255),
-                )
+                draw.rectangle([x0, y0, x1, y1], fill=(255, 255, 255))
                 if ch != " ":
-                    draw.text((c * cell_w, r * cell_h), ch,
-                              fill=(0, 0, 0), font=font)
+                    draw.text((x0, y0), ch, fill=(0, 0, 0), font=big_font)
             elif ch != " ":
-                draw.text((c * cell_w, r * cell_h), ch,
-                          fill=(255, 255, 255), font=font)
+                draw.text((x0, y0), ch, fill=(255, 255, 255), font=big_font)
+
+    # Downsample + binarize for crisp output
+    canvas_small = canvas.resize((cols * cell_w, rows * cell_h), Image.LANCZOS)
+    canvas_arr = np.array(canvas_small)
+    canvas_bin = ((canvas_arr > 127).astype(np.uint8) * 255)
+    canvas = Image.fromarray(canvas_bin, "RGB")
 
     return canvas.resize(img.size, Image.LANCZOS)
 
