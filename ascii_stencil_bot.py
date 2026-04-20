@@ -1,12 +1,16 @@
 """Collage stencil ASCII bot.
 
-Fetches 3 images from Slack and converts each to an ASCII art rendering
+Fetches 3 images from Slack and converts each to a character art rendering
 (white characters on black background) used as a binary stencil mask.
 Generates 6 composites (all permutations of stencil/fill pair) plus the
-3 ASCII stencil masks — 9 images total. Posts to img-junkyard.
+3 stencil masks — 9 images total. Posts to img-junkyard.
 
-Dark source pixels → dense characters (white text), bright pixels → spaces (black).
-char_height controls detail level: smaller fraction = finer grid, larger = blockier look.
+For each image cell, selects the character whose rendered pixel pattern
+best matches the image content (lowest MSE). This makes character choice
+contour-aware rather than purely tonal — edges and curves in the image
+influence which character appears, not just brightness.
+
+char_height controls grid detail: smaller fraction = finer grid, larger = blockier look.
 """
 import argparse
 import logging
@@ -19,12 +23,19 @@ from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger(__name__)
 
-# Character ramp ordered by visual ink density (complex → simple → space).
-# Dark source pixels → complex/dense CJK character; bright pixels → space.
-_RAMP = "鬱藏疆赢德意道常高重明来目日木人一 "
+# Mixed character set for template matching.
+# CJK ordered by stroke density + box drawing (directional) +
+# block elements (tonal) + geometric shapes + space (empty cell).
+_CHARS = (
+    "鬱藏疆赢德意道常高重明来目日木人一"  # CJK dense → sparse
+    "═║╔╗╚╝╠╣╦╩╬─│┌┐└┘├┤┬┴┼"          # box drawing (directional)
+    "█▓▒░▀▄▌▐▖▗▘▝"                     # block elements (tonal)
+    "●◆■▲◉◎○◇□△"                       # geometric shapes
+    " "                                 # empty cell
+)
 
 _FONT_PATHS = [
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",   # Ubuntu CI (fonts-noto-cjk)
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",   # Ubuntu CI
     "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
     "/System/Library/Fonts/PingFang.ttc",                        # macOS
     "/System/Library/Fonts/STHeiti Light.ttc",
@@ -35,51 +46,93 @@ def _load_font(font_size: int):
     for path in _FONT_PATHS:
         if Path(path).exists():
             return ImageFont.truetype(path, size=font_size)
-    logger.warning("No monospace font found on disk, using PIL default")
+    logger.warning("No CJK font found, using PIL default")
     return ImageFont.load_default()
 
 
-def make_ascii_stencil(img: Image.Image, char_height: float = 0.02) -> Image.Image:
-    """Convert image to ASCII art: white characters on black background.
+def _build_glyph_atlas(chars: str, font, cell_w: int, cell_h: int):
+    """Pre-render each character as a grayscale patch of size (cell_h, cell_w).
 
-    Dark source pixels map to dense characters; bright pixels map to spaces.
-    char_height is a fraction of the image height (e.g. 0.02 = 2%).
-    Returns an RGB image resized to the original input dimensions.
+    Centers each glyph within the cell using its measured bounding box.
+
+    Returns:
+        atlas:     float32 numpy array, shape (N, cell_h, cell_w)
+        char_list: list of N characters in matching order
+    """
+    probe = ImageDraw.Draw(Image.new("L", (cell_w * 2, cell_h * 2)))
+    patches = []
+    char_list = []
+    for ch in chars:
+        patch = Image.new("L", (cell_w, cell_h), 0)
+        d = ImageDraw.Draw(patch)
+        try:
+            bbox = probe.textbbox((0, 0), ch, font=font)
+            x = (cell_w - (bbox[2] - bbox[0])) // 2 - bbox[0]
+            y = (cell_h - (bbox[3] - bbox[1])) // 2 - bbox[1]
+        except Exception:
+            x, y = 0, 0
+        d.text((x, y), ch, fill=255, font=font)
+        patches.append(np.array(patch, dtype=np.float32))
+        char_list.append(ch)
+    return np.stack(patches, axis=0), char_list
+
+
+def make_ascii_stencil(img: Image.Image, char_height: float = 0.02) -> Image.Image:
+    """Convert image to character art using template matching.
+
+    For each grid cell, selects the character whose rendered pixel pattern
+    has the lowest MSE against the image cell. This is contour-aware:
+    horizontal edges attract box-drawing chars, dense regions attract
+    complex CJK characters, etc.
+
+    char_height: fraction of image height per character row (e.g. 0.03 = 3%)
+    Returns an RGB image resized to original input dimensions.
     """
     font_size = max(4, round(img.height * char_height))
     font = _load_font(font_size)
 
-    # Measure cell dimensions from the font
+    # Measure cell size from a representative CJK character
     probe_draw = ImageDraw.Draw(Image.new("L", (1, 1)))
-    bbox = probe_draw.textbbox((0, 0), "@", font=font)
+    bbox = probe_draw.textbbox((0, 0), "一", font=font)
     cell_w = max(1, bbox[2])
-    cell_h = max(1, font_size)  # use font_size for consistent row height
+    cell_h = max(1, font_size)
 
     w, h = img.size
     cols = max(1, w // cell_w)
     rows = max(1, h // cell_h)
 
-    # Compute per-cell average brightness via numpy reshape
+    logger.info(
+        f"Grid: {cols}×{rows} cells at {cell_w}×{cell_h}px, "
+        f"font_size={font_size}px, {len(_CHARS)} chars in atlas"
+    )
+
+    # Build glyph atlas once per call
+    atlas, char_list = _build_glyph_atlas(_CHARS, font, cell_w, cell_h)
+    # atlas shape: (N, cell_h, cell_w)
+
+    # Grayscale image as float32
     gray = np.array(img.convert("L"), dtype=np.float32)
     gray_trimmed = gray[:rows * cell_h, :cols * cell_w]
-    cells = gray_trimmed.reshape(rows, cell_h, cols, cell_w).mean(axis=(1, 3))
+    # Reshape to (rows, cols, cell_h, cell_w) for row-wise matching
+    cells_all = gray_trimmed.reshape(rows, cell_h, cols, cell_w).transpose(0, 2, 1, 3)
 
-    # Render ASCII onto black canvas
     canvas = Image.new("RGB", (cols * cell_w, rows * cell_h), (0, 0, 0))
     draw = ImageDraw.Draw(canvas)
-    ramp_len = len(_RAMP) - 1
 
+    # Template matching row by row (memory-efficient)
     for r in range(rows):
-        for c in range(cols):
-            idx = round(float(cells[r, c]) / 255.0 * ramp_len)
-            char = _RAMP[idx]
-            if char != " ":
-                draw.text((c * cell_w, r * cell_h), char,
+        row_cells = cells_all[r]  # (cols, cell_h, cell_w)
+        # Broadcast: (cols, N, cell_h, cell_w) → MSE → (cols, N)
+        diffs = (
+            (row_cells[:, np.newaxis, :, :] - atlas[np.newaxis, :, :, :]) ** 2
+        ).mean(axis=(2, 3))
+        best_indices = np.argmin(diffs, axis=1)  # (cols,)
+        for c, idx in enumerate(best_indices):
+            ch = char_list[idx]
+            if ch != " ":
+                draw.text((c * cell_w, r * cell_h), ch,
                           fill=(255, 255, 255), font=font)
 
-    logger.info(f"ASCII grid: {cols}×{rows} cells at {cell_w}×{cell_h}px each")
-
-    # Resize back to original image dimensions
     return canvas.resize(img.size, Image.LANCZOS)
 
 
@@ -91,7 +144,7 @@ def main():
     parser.add_argument("--post-channel", default="img-junkyard")
     parser.add_argument("--output-dir", type=Path, default=Path("./ascii-stencil-bot-output"))
     parser.add_argument("--char-height", type=float, default=0.02,
-                        help="Character height as fraction of image height (e.g. 0.02 = 2%%)")
+                        help="Character height as fraction of image height (e.g. 0.03 = 3%%)")
     parser.add_argument("--no-post", action="store_true")
     args = parser.parse_args()
 
@@ -112,11 +165,11 @@ def main():
     source_paths = list(fetch_random_images(token, args.source_channel, 3, source_dir))
     images = [Image.open(p).convert("RGB") for p in source_paths]
 
-    # Build ASCII stencil masks for all 3 source images
+    # Build stencil masks for all 3 source images
     masks = []
     mask_paths = []
     for i, img in enumerate(images):
-        logger.info(f"Generating ASCII stencil {i + 1}/3 (char_height={args.char_height})...")
+        logger.info(f"Generating stencil {i + 1}/3 (char_height={args.char_height})...")
         ascii_img = make_ascii_stencil(img, char_height=args.char_height)
         mask = make_stencil(ascii_img)
         mask_rgb = mask.convert("RGB")
