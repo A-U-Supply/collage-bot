@@ -1,0 +1,50 @@
+name: Run Typographer ASCII Bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_channel:
+        description: 'Channel to fetch images from'
+        default: 'image-gen'
+      post_channel:
+        description: 'Channel to post results to'
+        default: 'img-junkyard'
+      ascii_width:
+        description: 'Characters per row (wider = more detail)'
+        default: '120'
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install fonts
+        run: sudo apt-get install -y fonts-liberation
+
+      - name: Cache typographer binary
+        id: cache-typographer
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/typographer
+          key: typographer-${{ runner.os }}-v1
+
+      - name: Install typographer
+        if: steps.cache-typographer.outputs.cache-hit != 'true'
+        run: cargo install ascii-typographer
+
+      - name: Run typographer bot
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          python typographer_bot.py \
+            --source-channel "${{ inputs.source_channel }}" \
+            --post-channel "${{ inputs.post_channel }}" \
+            --ascii-width "${{ inputs.ascii_width }}"
