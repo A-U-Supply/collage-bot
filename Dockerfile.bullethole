@@ -1,0 +1,6 @@
+FROM python:3.11-slim
+WORKDIR /app
+COPY bullethole_bot.py stencil_transform.py ./
+RUN pip install --no-cache-dir Pillow numpy
+COPY bullethole_run.py ./
+ENTRYPOINT ["python", "/app/bullethole_run.py"]
