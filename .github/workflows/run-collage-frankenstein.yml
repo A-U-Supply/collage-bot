@@ -32,6 +32,9 @@ on:
       warp_strip:
         description: 'Border strip width (px) used to match forms for shift computation'
         default: '20'
+      warp_pad:
+        description: 'Overhang pixels of source context on each quadrant edge (0 = tile boundary strips)'
+        default: '20'
 
 jobs:
   run:
@@ -59,4 +62,5 @@ jobs:
             --warp-depth "${{ inputs.warp_depth }}" \
             --warp-radius "${{ inputs.warp_radius }}" \
             --warp-scale "${{ inputs.warp_scale }}" \
-            --warp-strip "${{ inputs.warp_strip }}"
+            --warp-strip "${{ inputs.warp_strip }}" \
+            --warp-pad "${{ inputs.warp_pad }}"

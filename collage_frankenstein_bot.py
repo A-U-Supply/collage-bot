@@ -66,13 +66,28 @@ def standardize(img: Image.Image, size: int) -> Image.Image:
     return img.resize((size, size), Image.LANCZOS)
 
 
-def slice_quadrants(img: Image.Image) -> list[Image.Image]:
-    """Cut a square image into a 3×3 grid. Returns 9 PIL Images in row-major order."""
+def slice_quadrants(img: Image.Image, pad: int = 0) -> list[Image.Image]:
+    """Cut a square image into a 3×3 grid. Returns 9 PIL Images in row-major order.
+
+    pad > 0: each returned tile is (q + 2*pad) × (q + 2*pad) — the core q×q
+    quadrant surrounded by `pad` pixels of source-image context on every side,
+    using edge replication at image boundaries.  The overhang pixels are not
+    rendered on the output canvas; they exist solely to inform the warp shift
+    computation so it can see where each quadrant's forms were heading.
+    """
     w, h = img.size
     assert w == h, "image must be square before slicing"
     q = w // 3
+    if pad == 0:
+        return [
+            img.crop((c * q, r * q, (c + 1) * q, (r + 1) * q))
+            for r in range(3)
+            for c in range(3)
+        ]
+    arr = np.pad(np.array(img), ((pad, pad), (pad, pad), (0, 0)), mode="edge")
     return [
-        img.crop((c * q, r * q, (c + 1) * q, (r + 1) * q))
+        Image.fromarray(arr[r * q : r * q + q + 2 * pad,
+                            c * q : c * q + q + 2 * pad])
         for r in range(3)
         for c in range(3)
     ]
@@ -346,52 +361,73 @@ def _warp_vertical(
     warp_radius: int,
     warp_scale: float = 1.0,
     warp_strip: int = 20,
+    warp_pad: int = 0,
 ) -> None:
     """Geometric warp at a left-right tile boundary.
 
-    Both tiles bend toward each other by half the computed shift.  Shifts are
-    found by maximising gradient-magnitude NCC across a strip of warp_strip
-    columns from each tile, so the displacement field aligns visual forms and
-    edges rather than just border-pixel colours.
-    """
-    H = left_arr.shape[0]
-    strip_w = max(1, min(warp_strip, left_arr.shape[1], right_arr.shape[1]))
-    shifts = _compute_shifts(
-        left_arr[:, -strip_w:].astype(np.float32),
-        right_arr[:, :strip_w].astype(np.float32),
-        warp_radius,
-        scale=warp_scale,
-    )  # (H,) — positive = right tile needs to move up to match left
+    Both tiles bend toward each other by half the computed shift.
 
+    When warp_pad > 0, left_arr / right_arr are padded (q+2*pad)×(q+2*pad)
+    arrays.  Shift computation uses the overhang strips — what each source
+    image looks like PAST the quadrant's cut edge — so the displacement field
+    aligns the forms each tile was heading toward rather than just the pixels
+    at the hard boundary.  The displacement is applied to the core q×q region.
+
+    When warp_pad == 0, falls back to gradient-NCC on the tile's own boundary
+    strip (warp_strip columns wide).
+    """
+    pad = warp_pad
+    if pad > 0:
+        q = left_arr.shape[0] - 2 * pad
+        left_core  = left_arr [pad : pad + q, pad : pad + q]
+        right_core = right_arr[pad : pad + q, pad : pad + q]
+        eff = max(1, min(pad, warp_strip))
+        # Left tile's right overhang: source image continuation past A's right edge
+        left_overhang  = left_arr [pad : pad + q, pad + q : pad + q + eff]
+        # Right tile's left overhang: source image that preceded B's left edge
+        right_overhang = right_arr[pad : pad + q, pad - eff : pad          ]
+        shifts = _compute_shifts(
+            left_overhang.astype(np.float32),
+            right_overhang.astype(np.float32),
+            warp_radius, scale=warp_scale,
+        )
+    else:
+        q = left_arr.shape[0]
+        left_core  = left_arr
+        right_core = right_arr
+        strip_w = max(1, min(warp_strip, q))
+        shifts = _compute_shifts(
+            left_core[:, -strip_w:].astype(np.float32),
+            right_core[:, :strip_w].astype(np.float32),
+            warp_radius, scale=warp_scale,
+        )
+
+    H = q  # canvas height of this tile row
     half = shifts / 2.0
 
     # ---- Warp left tile's right zone ----
     # c=0: interior (no shift), c=warp_depth-1: boundary (full half shift)
-    depth_l = min(warp_depth, left_arr.shape[1])
+    depth_l = min(warp_depth, q)
     c_idx = np.arange(depth_l, dtype=np.float32)
-    fade_l = c_idx / max(depth_l - 1, 1)           # (depth_l,) 0→1 toward boundary
-    dr_l = half[:, np.newaxis] * fade_l[np.newaxis, :]  # (H, depth_l)
+    fade_l = c_idx / max(depth_l - 1, 1)
+    dr_l = half[:, np.newaxis] * fade_l[np.newaxis, :]          # (H, depth_l)
 
-    map_r_l = np.arange(H, dtype=np.float32)[:, np.newaxis] + dr_l   # (H, depth_l)
-    map_c_l = (left_arr.shape[1] - depth_l + c_idx)[np.newaxis, :] * np.ones((H, 1))
-    warped_left_zone = _bilinear_remap(
-        left_arr, map_r_l, map_c_l.astype(np.float32)
-    )
+    map_r_l = np.arange(H, dtype=np.float32)[:, np.newaxis] + dr_l
+    map_c_l = (q - depth_l + c_idx)[np.newaxis, :] * np.ones((H, 1))
+    warped_left_zone = _bilinear_remap(left_core, map_r_l, map_c_l.astype(np.float32))
     canvas[canvas_y : canvas_y + H,
            x_boundary - depth_l : x_boundary] = warped_left_zone
 
     # ---- Warp right tile's left zone ----
     # c=0: boundary (full half shift), c=warp_depth-1: interior (no shift)
-    depth_r = min(warp_depth, right_arr.shape[1])
+    depth_r = min(warp_depth, q)
     c_idx_r = np.arange(depth_r, dtype=np.float32)
-    fade_r = (depth_r - 1 - c_idx_r) / max(depth_r - 1, 1)  # 1→0 away from boundary
-    dr_r = (-half[:, np.newaxis]) * fade_r[np.newaxis, :]     # (H, depth_r)
+    fade_r = (depth_r - 1 - c_idx_r) / max(depth_r - 1, 1)
+    dr_r = (-half[:, np.newaxis]) * fade_r[np.newaxis, :]        # (H, depth_r)
 
     map_r_r = np.arange(H, dtype=np.float32)[:, np.newaxis] + dr_r
     map_c_r = c_idx_r[np.newaxis, :] * np.ones((H, 1))
-    warped_right_zone = _bilinear_remap(
-        right_arr, map_r_r, map_c_r.astype(np.float32)
-    )
+    warped_right_zone = _bilinear_remap(right_core, map_r_r, map_c_r.astype(np.float32))
     right_canvas_x = x_boundary - overlap
     canvas[canvas_y : canvas_y + H,
            right_canvas_x : right_canvas_x + depth_r] = warped_right_zone
@@ -408,48 +444,68 @@ def _warp_horizontal(
     warp_radius: int,
     warp_scale: float = 1.0,
     warp_strip: int = 20,
+    warp_pad: int = 0,
 ) -> None:
     """Geometric warp at a top-bottom tile boundary.
 
-    Transpose of _warp_vertical: shifts are per-column horizontal offsets,
-    found via gradient-magnitude NCC over a strip of warp_strip rows.
+    Transpose of _warp_vertical: shifts are per-column horizontal offsets.
+    When warp_pad > 0, uses overhang rows (source image continuation past
+    each tile's cut edge) for shift computation.
     """
-    W = top_arr.shape[1]
-    strip_h = max(1, min(warp_strip, top_arr.shape[0], bottom_arr.shape[0]))
-    # Transpose strips so the NCC operates per-column (reuse _compute_shifts)
-    shifts = _compute_shifts(
-        top_arr[-strip_h:, :].astype(np.float32).transpose(1, 0, 2),
-        bottom_arr[:strip_h, :].astype(np.float32).transpose(1, 0, 2),
-        warp_radius,
-        scale=warp_scale,
-    )  # (W,)
+    pad = warp_pad
+    if pad > 0:
+        q = top_arr.shape[1] - 2 * pad
+        top_core    = top_arr   [pad : pad + q, pad : pad + q]
+        bottom_core = bottom_arr[pad : pad + q, pad : pad + q]
+        eff = max(1, min(pad, warp_strip))
+        # Top tile's bottom overhang: source image continuation below T's bottom edge
+        top_overhang    = top_arr   [pad + q : pad + q + eff, pad : pad + q]
+        # Bottom tile's top overhang: source image that preceded B's top edge
+        bottom_overhang = bottom_arr[pad - eff : pad,          pad : pad + q]
+        # Transpose so _compute_shifts operates per-column
+        shifts = _compute_shifts(
+            top_overhang.astype(np.float32).transpose(1, 0, 2),
+            bottom_overhang.astype(np.float32).transpose(1, 0, 2),
+            warp_radius, scale=warp_scale,
+        )
+    else:
+        q = top_arr.shape[0]
+        top_core    = top_arr
+        bottom_core = bottom_arr
+        strip_h = max(1, min(warp_strip, q))
+        shifts = _compute_shifts(
+            top_core[-strip_h:, :].astype(np.float32).transpose(1, 0, 2),
+            bottom_core[:strip_h, :].astype(np.float32).transpose(1, 0, 2),
+            warp_radius, scale=warp_scale,
+        )
 
+    W = q
     half = shifts / 2.0
 
     # ---- Warp top tile's bottom zone ----
-    depth_t = min(warp_depth, top_arr.shape[0])
+    depth_t = min(warp_depth, q)
     r_idx = np.arange(depth_t, dtype=np.float32)
-    fade_t = r_idx / max(depth_t - 1, 1)            # 0→1 toward boundary
-    dc_t = half[np.newaxis, :] * fade_t[:, np.newaxis]  # (depth_t, W)
+    fade_t = r_idx / max(depth_t - 1, 1)
+    dc_t = half[np.newaxis, :] * fade_t[:, np.newaxis]       # (depth_t, W)
 
-    map_r_t = (top_arr.shape[0] - depth_t + r_idx)[:, np.newaxis] * np.ones((1, W))
+    map_r_t = (q - depth_t + r_idx)[:, np.newaxis] * np.ones((1, W))
     map_c_t = np.arange(W, dtype=np.float32)[np.newaxis, :] + dc_t
     warped_top_zone = _bilinear_remap(
-        top_arr, map_r_t.astype(np.float32), map_c_t.astype(np.float32)
+        top_core, map_r_t.astype(np.float32), map_c_t.astype(np.float32)
     )
     canvas[y_boundary - depth_t : y_boundary,
            canvas_x : canvas_x + W] = warped_top_zone
 
     # ---- Warp bottom tile's top zone ----
-    depth_b = min(warp_depth, bottom_arr.shape[0])
+    depth_b = min(warp_depth, q)
     r_idx_b = np.arange(depth_b, dtype=np.float32)
-    fade_b = (depth_b - 1 - r_idx_b) / max(depth_b - 1, 1)  # 1→0 away from boundary
+    fade_b = (depth_b - 1 - r_idx_b) / max(depth_b - 1, 1)
     dc_b = (-half[np.newaxis, :]) * fade_b[:, np.newaxis]    # (depth_b, W)
 
     map_r_b = r_idx_b[:, np.newaxis] * np.ones((1, W))
     map_c_b = np.arange(W, dtype=np.float32)[np.newaxis, :] + dc_b
     warped_bottom_zone = _bilinear_remap(
-        bottom_arr, map_r_b.astype(np.float32), map_c_b.astype(np.float32)
+        bottom_core, map_r_b.astype(np.float32), map_c_b.astype(np.float32)
     )
     bottom_canvas_y = y_boundary - overlap
     canvas[bottom_canvas_y : bottom_canvas_y + depth_b,
@@ -475,6 +531,7 @@ def assemble_output(
     warp_radius: int = 30,
     warp_scale: float = 1.0,
     warp_strip: int = 20,
+    warp_pad: int = 0,
 ) -> Image.Image:
     """Greedily assemble one 3×3 output, then apply boundary effects.
 
@@ -493,10 +550,13 @@ def assemble_output(
     canvas_size = quad_size + 2 * step              # = 3*quad_size - 2*overlap
 
     canvas = Image.new("RGB", (canvas_size, canvas_size))
-    placed: list[np.ndarray | None] = [None] * 9   # for edge scoring
-    grid: list[list[np.ndarray | None]] = [[None] * 3 for _ in range(3)]
+    placed: list[np.ndarray | None] = [None] * 9              # core arrays, for edge scoring
+    grid: list[list[np.ndarray | None]] = [[None] * 3 for _ in range(3)]         # cores, for quilt
+    grid_padded: list[list[np.ndarray | None]] = [[None] * 3 for _ in range(3)]  # padded, for warp
     remaining = list(range(len(pieces)))
     rng.shuffle(remaining)
+
+    pad = warp_pad  # overhang on each side (0 = no overhang)
 
     # ------------------------------------------------------------------
     # Phase 1: greedy tile selection + placement
@@ -509,23 +569,28 @@ def assemble_output(
         best_score = float("inf")
         best_piece_idx = None
         best_arr = None
+        best_padded = None
         best_img = None
 
         for piece_list_idx in remaining:
             tile = pieces[piece_list_idx][2]
             for transpose, invert in TRANSFORMS:
                 candidate = apply_transform(tile, transpose, invert)
-                arr = np.array(candidate)
-                score = edge_score(arr, above_arr, left_arr)
+                full = np.array(candidate)
+                # Extract core for scoring and canvas placement
+                core = full[pad : pad + quad_size, pad : pad + quad_size] if pad > 0 else full
+                score = edge_score(core, above_arr, left_arr)
                 if score < best_score:
                     best_score = score
                     best_piece_idx = piece_list_idx
-                    best_arr = arr
-                    best_img = candidate
+                    best_arr = core
+                    best_padded = full
+                    best_img = Image.fromarray(core)
 
         remaining.remove(best_piece_idx)
         placed[slot] = best_arr
         grid[row][col] = best_arr
+        grid_padded[row][col] = best_padded
         canvas.paste(best_img, (col * step, row * step))
 
     canvas_arr = np.array(canvas)
@@ -569,8 +634,8 @@ def assemble_output(
                 x_boundary = (col_seam - 1) * step + quad_size
                 _warp_vertical(
                     canvas_arr,
-                    grid[tile_row][col_seam - 1],
-                    grid[tile_row][col_seam],
+                    grid_padded[tile_row][col_seam - 1],
+                    grid_padded[tile_row][col_seam],
                     canvas_y=canvas_y,
                     x_boundary=x_boundary,
                     overlap=overlap,
@@ -578,6 +643,7 @@ def assemble_output(
                     warp_radius=warp_radius,
                     warp_scale=warp_scale,
                     warp_strip=warp_strip,
+                    warp_pad=warp_pad,
                 )
         for row_seam in range(1, 3):
             y_boundary = (row_seam - 1) * step + quad_size
@@ -585,8 +651,8 @@ def assemble_output(
                 canvas_x = tile_col * step
                 _warp_horizontal(
                     canvas_arr,
-                    grid[row_seam - 1][tile_col],
-                    grid[row_seam][tile_col],
+                    grid_padded[row_seam - 1][tile_col],
+                    grid_padded[row_seam][tile_col],
                     canvas_x=canvas_x,
                     y_boundary=y_boundary,
                     overlap=overlap,
@@ -594,6 +660,7 @@ def assemble_output(
                     warp_radius=warp_radius,
                     warp_scale=warp_scale,
                     warp_strip=warp_strip,
+                    warp_pad=warp_pad,
                 )
 
     return Image.fromarray(canvas_arr)
@@ -623,6 +690,9 @@ def main():
                         help="Multiply computed shifts by this factor to amplify warp (default: 1.0)")
     parser.add_argument("--warp-strip", type=int, default=20,
                         help="Width of border strip (px) used to match forms for shift computation (default: 20)")
+    parser.add_argument("--warp-pad", type=int, default=20,
+                        help="Overhang pixels of source context retained on each quadrant edge "
+                             "to inform warp shift computation (default: 20; 0 = use tile boundary strips)")
     parser.add_argument("--no-post", action="store_true")
     args = parser.parse_args()
 
@@ -646,7 +716,7 @@ def main():
     images = [standardize(Image.open(p).convert("RGB"), args.size) for p in source_paths]
     logger.info(f"Standardized {len(images)} images to {args.size}×{args.size}")
 
-    quadrants = [slice_quadrants(img) for img in images]
+    quadrants = [slice_quadrants(img, pad=args.warp_pad) for img in images]
     logger.info(f"Sliced into {len(quadrants) * 9} quadrants ({quad_size}×{quad_size} each)")
 
     latin = make_latin_square(9, rng)
@@ -666,6 +736,7 @@ def main():
             warp_radius=args.warp_radius,
             warp_scale=args.warp_scale,
             warp_strip=args.warp_strip,
+            warp_pad=args.warp_pad,
         )
         dest = out_dir / f"frankenstein_output_{out_i + 1}.png"
         result.save(dest)
