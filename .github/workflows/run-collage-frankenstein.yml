@@ -29,6 +29,9 @@ on:
       warp_scale:
         description: 'Shift amplification multiplier (>1 exaggerates warp)'
         default: '1.0'
+      warp_strip:
+        description: 'Border strip width (px) used to match forms for shift computation'
+        default: '20'
 
 jobs:
   run:
@@ -55,4 +58,5 @@ jobs:
             ${{ inputs.warp && '--warp' || '' }} \
             --warp-depth "${{ inputs.warp_depth }}" \
             --warp-radius "${{ inputs.warp_radius }}" \
-            --warp-scale "${{ inputs.warp_scale }}"
+            --warp-scale "${{ inputs.warp_scale }}" \
+            --warp-strip "${{ inputs.warp_strip }}"

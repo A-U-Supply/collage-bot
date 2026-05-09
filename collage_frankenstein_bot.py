@@ -274,29 +274,63 @@ def _bilinear_remap(src: np.ndarray, map_r: np.ndarray, map_c: np.ndarray) -> np
     ).clip(0, 255).astype(np.uint8)
 
 
+def _grad_mag(strip: np.ndarray) -> np.ndarray:
+    """Gradient magnitude of an (H, W, 3) strip → (H, W) float32.
+
+    Uses central differences on the luminance channel so that structural
+    edges and forms are captured independent of colour.
+    """
+    gray = strip.mean(axis=2).astype(np.float32)        # (H, W)
+    dy = np.gradient(gray, axis=0)
+    dx = np.gradient(gray, axis=1)
+    return np.sqrt(dy ** 2 + dx ** 2)
+
+
+def _ncc_rows(row_a: np.ndarray, row_b: np.ndarray) -> float:
+    """Normalized cross-correlation between two 1-D gradient-magnitude rows.
+
+    Returns a value in [-1, 1]; higher = better structural alignment.
+    Falls back to 0 when either row has no variance (flat region).
+    """
+    a = row_a - row_a.mean()
+    b = row_b - row_b.mean()
+    denom = float(np.sqrt((a ** 2).sum() * (b ** 2).sum()))
+    if denom < 1e-6:
+        return 0.0
+    return float((a * b).sum() / denom)
+
+
 def _compute_shifts(
-    edge_a: np.ndarray,
-    edge_b: np.ndarray,
+    strip_a: np.ndarray,
+    strip_b: np.ndarray,
     radius: int,
     scale: float = 1.0,
 ) -> np.ndarray:
-    """Per-row vertical shifts that align edge_a to edge_b.
+    """Per-row vertical shifts that best align the forms in strip_a to strip_b.
 
-    For each row r, find integer shift s in [-radius, +radius] that minimises
-    mean(|edge_a[r] - edge_b[clamp(r+s)]|).  Returns smoothed float shifts
-    multiplied by scale (use scale > 1 to amplify the warp effect).
+    Computes gradient magnitude of each strip then, for every row r, finds
+    the integer shift s in [-radius, +radius] that maximises the normalised
+    cross-correlation between gradient row r of strip_a and gradient row r+s
+    of strip_b.  NCC on gradients matches structural edges/forms rather than
+    raw colour, so the resulting shifts align visual content across the tile
+    boundary.
 
-    edge_a, edge_b: (N, 3) float arrays — one edge column/row each.
+    strip_a, strip_b: (H, W, 3) float arrays — border strips from each tile.
+    Returns smoothed float shifts multiplied by scale.
     """
-    N = len(edge_a)
-    raw = np.zeros(N, dtype=np.float64)
-    for r in range(N):
-        best_s, best_err = 0, float("inf")
+    H = strip_a.shape[0]
+    grad_a = _grad_mag(strip_a)  # (H, W)
+    grad_b = _grad_mag(strip_b)  # (H, W)
+
+    raw = np.zeros(H, dtype=np.float64)
+    for r in range(H):
+        best_s, best_score = 0, -2.0
+        row_a = grad_a[r]
         for s in range(-radius, radius + 1):
-            r2 = max(0, min(N - 1, r + s))
-            err = float(np.mean(np.abs(edge_a[r] - edge_b[r2])))
-            if err < best_err:
-                best_s, best_err = s, err
+            r2 = max(0, min(H - 1, r + s))
+            score = _ncc_rows(row_a, grad_b[r2])
+            if score > best_score:
+                best_s, best_score = s, score
         raw[r] = best_s
     return _gaussian_smooth_1d(raw, sigma=8.0) * scale
 
@@ -311,18 +345,20 @@ def _warp_vertical(
     warp_depth: int,
     warp_radius: int,
     warp_scale: float = 1.0,
+    warp_strip: int = 20,
 ) -> None:
     """Geometric warp at a left-right tile boundary.
 
-    Both tiles bend toward each other by half the computed shift.  The left
-    tile's rightmost warp_depth columns and the right tile's leftmost
-    warp_depth columns are remapped so their content flows toward alignment
-    at the boundary edge.
+    Both tiles bend toward each other by half the computed shift.  Shifts are
+    found by maximising gradient-magnitude NCC across a strip of warp_strip
+    columns from each tile, so the displacement field aligns visual forms and
+    edges rather than just border-pixel colours.
     """
     H = left_arr.shape[0]
+    strip_w = max(1, min(warp_strip, left_arr.shape[1], right_arr.shape[1]))
     shifts = _compute_shifts(
-        left_arr[:, -1].astype(np.float32),
-        right_arr[:, 0].astype(np.float32),
+        left_arr[:, -strip_w:].astype(np.float32),
+        right_arr[:, :strip_w].astype(np.float32),
         warp_radius,
         scale=warp_scale,
     )  # (H,) — positive = right tile needs to move up to match left
@@ -371,15 +407,19 @@ def _warp_horizontal(
     warp_depth: int,
     warp_radius: int,
     warp_scale: float = 1.0,
+    warp_strip: int = 20,
 ) -> None:
     """Geometric warp at a top-bottom tile boundary.
 
-    Transpose of _warp_vertical: shifts are per-column horizontal offsets.
+    Transpose of _warp_vertical: shifts are per-column horizontal offsets,
+    found via gradient-magnitude NCC over a strip of warp_strip rows.
     """
     W = top_arr.shape[1]
+    strip_h = max(1, min(warp_strip, top_arr.shape[0], bottom_arr.shape[0]))
+    # Transpose strips so the NCC operates per-column (reuse _compute_shifts)
     shifts = _compute_shifts(
-        top_arr[-1, :].astype(np.float32),
-        bottom_arr[0, :].astype(np.float32),
+        top_arr[-strip_h:, :].astype(np.float32).transpose(1, 0, 2),
+        bottom_arr[:strip_h, :].astype(np.float32).transpose(1, 0, 2),
         warp_radius,
         scale=warp_scale,
     )  # (W,)
@@ -434,6 +474,7 @@ def assemble_output(
     warp_depth: int = 80,
     warp_radius: int = 30,
     warp_scale: float = 1.0,
+    warp_strip: int = 20,
 ) -> Image.Image:
     """Greedily assemble one 3×3 output, then apply boundary effects.
 
@@ -536,6 +577,7 @@ def assemble_output(
                     warp_depth=warp_depth,
                     warp_radius=warp_radius,
                     warp_scale=warp_scale,
+                    warp_strip=warp_strip,
                 )
         for row_seam in range(1, 3):
             y_boundary = (row_seam - 1) * step + quad_size
@@ -551,6 +593,7 @@ def assemble_output(
                     warp_depth=warp_depth,
                     warp_radius=warp_radius,
                     warp_scale=warp_scale,
+                    warp_strip=warp_strip,
                 )
 
     return Image.fromarray(canvas_arr)
@@ -578,6 +621,8 @@ def main():
                         help="Per-row shift search radius in pixels (default: 30)")
     parser.add_argument("--warp-scale", type=float, default=1.0,
                         help="Multiply computed shifts by this factor to amplify warp (default: 1.0)")
+    parser.add_argument("--warp-strip", type=int, default=20,
+                        help="Width of border strip (px) used to match forms for shift computation (default: 20)")
     parser.add_argument("--no-post", action="store_true")
     args = parser.parse_args()
 
@@ -620,6 +665,7 @@ def main():
             warp_depth=args.warp_depth,
             warp_radius=args.warp_radius,
             warp_scale=args.warp_scale,
+            warp_strip=args.warp_strip,
         )
         dest = out_dir / f"frankenstein_output_{out_i + 1}.png"
         result.save(dest)
