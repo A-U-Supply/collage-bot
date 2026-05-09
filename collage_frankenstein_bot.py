@@ -33,6 +33,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageOps
 
+from stencil_transform import make_stencil
+
 logger = logging.getLogger(__name__)
 
 # Pixels of overlap at each internal seam for image quilting.
@@ -616,6 +618,8 @@ def main():
                         help="Multiply computed shifts by this factor to amplify warp (default: 1.0)")
     parser.add_argument("--warp-strip", type=int, default=20,
                         help="Width of border strip (px) used to match forms for shift computation (default: 20)")
+    parser.add_argument("--stencil", action="store_true",
+                        help="Convert source images to binary black & white before slicing into quadrants")
     parser.add_argument("--no-post", action="store_true")
     args = parser.parse_args()
 
@@ -638,6 +642,10 @@ def main():
     source_paths = fetch_random_images(token, args.source_channel, 9, source_dir)
     images = [standardize(Image.open(p).convert("RGB"), args.size) for p in source_paths]
     logger.info(f"Standardized {len(images)} images to {args.size}×{args.size}")
+
+    if args.stencil:
+        images = [make_stencil(img).convert("RGB") for img in images]
+        logger.info("Applied stencil (binary black & white) to all source images")
 
     quadrants = [slice_quadrants(img) for img in images]
     logger.info(f"Sliced into {len(quadrants) * 9} quadrants ({quad_size}×{quad_size} each)")
