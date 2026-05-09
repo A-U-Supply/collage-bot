@@ -36,7 +36,7 @@ from PIL import Image, ImageOps
 logger = logging.getLogger(__name__)
 
 # Pixels of overlap at each internal seam for image quilting.
-OVERLAP = 20
+OVERLAP = 40
 
 # ---------------------------------------------------------------------------
 # Transformation catalogue: (transpose_mode_or_None, invert_colours)
@@ -159,15 +159,18 @@ def _quilt_vertical(
     canvas_y: int,
     x_boundary: int,
     overlap: int,
+    feather: int = 6,
 ) -> None:
     """Recomposite the vertical overlap zone between two horizontally adjacent tiles.
 
-    The overlap zone on the canvas is [x_boundary - overlap, x_boundary) wide.
-    left_arr contributes its rightmost `overlap` columns; right_arr contributes
-    its leftmost `overlap` columns. The seam decides, per row, where to switch.
+    Because tiles are placed with spatial overlap, the right tile's pixels already
+    cover the entire overlap zone on the canvas. The seam decides where to switch
+    from left to right — so we must explicitly write the full blended composite
+    (restoring left tile pixels left of the seam, right tile pixels right of it,
+    with a ±feather pixel crossfade at the cut).
 
     canvas_y: top canvas row of this tile row.
-    x_boundary: canvas x where the left tile ends (= right of left tile).
+    x_boundary: canvas x where the left tile ends.
     """
     H = left_arr.shape[0]
     left_strip = left_arr[:, -overlap:].astype(np.float32)    # (H, overlap, 3)
@@ -175,12 +178,16 @@ def _quilt_vertical(
     error = np.mean((left_strip - right_strip) ** 2, axis=2)  # (H, overlap)
     seam = _min_cost_seam(error)                               # (H,) in [0, overlap)
 
+    # Build (H, overlap) alpha: 0 = pure left tile, 1 = pure right tile.
+    # Linear ramp of width 2*feather centred on the seam path.
+    col_idx = np.arange(overlap, dtype=np.float32)[np.newaxis, :]  # (1, overlap)
+    seam_col = seam[:, np.newaxis].astype(np.float32)               # (H, 1)
+    alpha = np.clip((col_idx - seam_col + feather) / (2 * feather), 0.0, 1.0)
+    alpha = alpha[:, :, np.newaxis]  # (H, overlap, 1) for RGB broadcast
+
+    blended = ((1.0 - alpha) * left_strip + alpha * right_strip).astype(np.uint8)
     zone_x = x_boundary - overlap
-    for r in range(H):
-        cut = seam[r]
-        # Cols [zone_x, zone_x+cut): left tile — already painted, leave them.
-        # Cols [zone_x+cut, zone_x+overlap): override with right tile pixels.
-        canvas[canvas_y + r, zone_x + cut : zone_x + overlap] = right_arr[r, cut:overlap]
+    canvas[canvas_y : canvas_y + H, zone_x : zone_x + overlap] = blended
 
 
 def _quilt_horizontal(
@@ -190,11 +197,14 @@ def _quilt_horizontal(
     canvas_x: int,
     y_boundary: int,
     overlap: int,
+    feather: int = 6,
 ) -> None:
     """Recomposite the horizontal overlap zone between two vertically adjacent tiles.
 
-    The overlap zone on the canvas is [y_boundary - overlap, y_boundary) tall.
-    top_arr contributes its bottom `overlap` rows; bottom_arr its top `overlap` rows.
+    Because tiles are placed with spatial overlap, the bottom tile's pixels already
+    cover the overlap zone. We write the full seam-blended composite so that top
+    tile pixels are restored above the seam and bottom tile pixels fill below it,
+    with a ±feather pixel crossfade.
 
     canvas_x: left canvas column of this tile column.
     y_boundary: canvas y where the top tile ends.
@@ -202,16 +212,18 @@ def _quilt_horizontal(
     W = top_arr.shape[1]
     top_strip = top_arr[-overlap:, :].astype(np.float32)       # (overlap, W, 3)
     bottom_strip = bottom_arr[:overlap, :].astype(np.float32)  # (overlap, W, 3)
-    # Transpose so seam runs left→right (each column gets a row-cut value).
+    # Transpose so the DP seam gives a row-cut value per column.
     error = np.mean((top_strip - bottom_strip) ** 2, axis=2).T  # (W, overlap)
     seam = _min_cost_seam(error)                                 # (W,) in [0, overlap)
 
+    row_idx = np.arange(overlap, dtype=np.float32)[:, np.newaxis]  # (overlap, 1)
+    seam_row = seam[np.newaxis, :].astype(np.float32)               # (1, W)
+    alpha = np.clip((row_idx - seam_row + feather) / (2 * feather), 0.0, 1.0)
+    alpha = alpha[:, :, np.newaxis]  # (overlap, W, 1)
+
+    blended = ((1.0 - alpha) * top_strip + alpha * bottom_strip).astype(np.uint8)
     zone_y = y_boundary - overlap
-    for c in range(W):
-        cut = seam[c]
-        # Rows [zone_y, zone_y+cut): top tile — already painted.
-        # Rows [zone_y+cut, zone_y+overlap): override with bottom tile pixels.
-        canvas[zone_y + cut : zone_y + overlap, canvas_x + c] = bottom_arr[cut:overlap, c]
+    canvas[zone_y : zone_y + overlap, canvas_x : canvas_x + W] = blended
 
 
 def make_latin_square(n: int, rng: np.random.Generator) -> list[list[int]]:
