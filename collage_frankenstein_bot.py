@@ -406,31 +406,32 @@ def _warp_vertical(
     half = shifts / 2.0
 
     # ---- Warp left tile's right zone ----
-    # c=0: interior (no shift), c=warp_depth-1: boundary (full half shift)
+    # Displacement is applied to the canvas (already quilted if quilt ran first).
+    # .copy() so the read and write don't alias.
     depth_l = min(warp_depth, q)
     c_idx = np.arange(depth_l, dtype=np.float32)
     fade_l = c_idx / max(depth_l - 1, 1)
     dr_l = half[:, np.newaxis] * fade_l[np.newaxis, :]          # (H, depth_l)
 
+    left_zone_x0 = x_boundary - depth_l
+    src_l = canvas[canvas_y : canvas_y + H, left_zone_x0 : x_boundary].copy()
     map_r_l = np.arange(H, dtype=np.float32)[:, np.newaxis] + dr_l
-    map_c_l = (q - depth_l + c_idx)[np.newaxis, :] * np.ones((H, 1))
-    warped_left_zone = _bilinear_remap(left_core, map_r_l, map_c_l.astype(np.float32))
+    map_c_l = c_idx[np.newaxis, :] * np.ones((H, 1))            # local cols 0..depth_l-1
     canvas[canvas_y : canvas_y + H,
-           x_boundary - depth_l : x_boundary] = warped_left_zone
+           left_zone_x0 : x_boundary] = _bilinear_remap(src_l, map_r_l, map_c_l.astype(np.float32))
 
     # ---- Warp right tile's left zone ----
-    # c=0: boundary (full half shift), c=warp_depth-1: interior (no shift)
     depth_r = min(warp_depth, q)
     c_idx_r = np.arange(depth_r, dtype=np.float32)
     fade_r = (depth_r - 1 - c_idx_r) / max(depth_r - 1, 1)
     dr_r = (-half[:, np.newaxis]) * fade_r[np.newaxis, :]        # (H, depth_r)
 
+    right_canvas_x = x_boundary - overlap
+    src_r = canvas[canvas_y : canvas_y + H, right_canvas_x : right_canvas_x + depth_r].copy()
     map_r_r = np.arange(H, dtype=np.float32)[:, np.newaxis] + dr_r
     map_c_r = c_idx_r[np.newaxis, :] * np.ones((H, 1))
-    warped_right_zone = _bilinear_remap(right_core, map_r_r, map_c_r.astype(np.float32))
-    right_canvas_x = x_boundary - overlap
     canvas[canvas_y : canvas_y + H,
-           right_canvas_x : right_canvas_x + depth_r] = warped_right_zone
+           right_canvas_x : right_canvas_x + depth_r] = _bilinear_remap(src_r, map_r_r, map_c_r.astype(np.float32))
 
 
 def _warp_horizontal(
@@ -488,13 +489,12 @@ def _warp_horizontal(
     fade_t = r_idx / max(depth_t - 1, 1)
     dc_t = half[np.newaxis, :] * fade_t[:, np.newaxis]       # (depth_t, W)
 
-    map_r_t = (q - depth_t + r_idx)[:, np.newaxis] * np.ones((1, W))
+    top_zone_y0 = y_boundary - depth_t
+    src_t = canvas[top_zone_y0 : y_boundary, canvas_x : canvas_x + W].copy()
+    map_r_t = r_idx[:, np.newaxis] * np.ones((1, W))          # local rows 0..depth_t-1
     map_c_t = np.arange(W, dtype=np.float32)[np.newaxis, :] + dc_t
-    warped_top_zone = _bilinear_remap(
-        top_core, map_r_t.astype(np.float32), map_c_t.astype(np.float32)
-    )
-    canvas[y_boundary - depth_t : y_boundary,
-           canvas_x : canvas_x + W] = warped_top_zone
+    canvas[top_zone_y0 : y_boundary,
+           canvas_x : canvas_x + W] = _bilinear_remap(src_t, map_r_t.astype(np.float32), map_c_t.astype(np.float32))
 
     # ---- Warp bottom tile's top zone ----
     depth_b = min(warp_depth, q)
@@ -502,14 +502,12 @@ def _warp_horizontal(
     fade_b = (depth_b - 1 - r_idx_b) / max(depth_b - 1, 1)
     dc_b = (-half[np.newaxis, :]) * fade_b[:, np.newaxis]    # (depth_b, W)
 
+    bottom_canvas_y = y_boundary - overlap
+    src_b = canvas[bottom_canvas_y : bottom_canvas_y + depth_b, canvas_x : canvas_x + W].copy()
     map_r_b = r_idx_b[:, np.newaxis] * np.ones((1, W))
     map_c_b = np.arange(W, dtype=np.float32)[np.newaxis, :] + dc_b
-    warped_bottom_zone = _bilinear_remap(
-        bottom_core, map_r_b.astype(np.float32), map_c_b.astype(np.float32)
-    )
-    bottom_canvas_y = y_boundary - overlap
     canvas[bottom_canvas_y : bottom_canvas_y + depth_b,
-           canvas_x : canvas_x + W] = warped_bottom_zone
+           canvas_x : canvas_x + W] = _bilinear_remap(src_b, map_r_b.astype(np.float32), map_c_b.astype(np.float32))
 
 
 def make_latin_square(n: int, rng: np.random.Generator) -> list[list[int]]:
