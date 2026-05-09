@@ -74,13 +74,43 @@ def apply_transform(tile: Image.Image, transpose, invert: bool) -> Image.Image:
     return tile
 
 
-def edge_score(candidate: np.ndarray, above: np.ndarray | None, left: np.ndarray | None) -> float:
-    """Mean absolute pixel difference along shared edges. Lower = more continuous."""
+def edge_score(
+    candidate: np.ndarray,
+    above: np.ndarray | None,
+    left: np.ndarray | None,
+    depth: int = 8,
+) -> float:
+    """Weighted mean absolute pixel difference across a strip of pixels on each
+    shared edge. Pixels closer to the boundary are weighted more heavily than
+    those further in, so the score reflects gradient continuity not just the
+    single border row/column.
+
+    depth: how many pixel rows/columns from each edge to include in scoring.
+    """
     score = 0.0
+
+    # Weights: linear ramp, boundary pixel = depth, innermost pixel = 1
+    weights = np.arange(depth, 0, -1, dtype=np.float32)  # [depth, depth-1, ..., 1]
+    weight_sum = float(weights.sum())
+
     if above is not None:
-        score += float(np.mean(np.abs(candidate[0].astype(np.float32) - above[-1].astype(np.float32))))
+        # Compare the top `depth` rows of candidate against the bottom `depth`
+        # rows of the tile above. Flip above's strip so row 0 is the boundary.
+        cand_strip = candidate[:depth].astype(np.float32)       # (depth, W, 3)
+        above_strip = above[-depth:][::-1].astype(np.float32)   # (depth, W, 3)
+        diff = np.abs(cand_strip - above_strip)                  # (depth, W, 3)
+        row_means = diff.mean(axis=(1, 2))                       # (depth,)
+        score += float((row_means * weights).sum() / weight_sum)
+
     if left is not None:
-        score += float(np.mean(np.abs(candidate[:, 0].astype(np.float32) - left[:, -1].astype(np.float32))))
+        # Compare the left `depth` columns of candidate against the right
+        # `depth` columns of the tile to the left.
+        cand_strip = candidate[:, :depth].astype(np.float32)       # (H, depth, 3)
+        left_strip = left[:, -depth:][:, ::-1].astype(np.float32)  # (H, depth, 3)
+        diff = np.abs(cand_strip - left_strip)                      # (H, depth, 3)
+        col_means = diff.mean(axis=(0, 2))                          # (depth,)
+        score += float((col_means * weights).sum() / weight_sum)
+
     return score
 
 
