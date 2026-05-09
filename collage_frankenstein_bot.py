@@ -257,6 +257,9 @@ def _bilinear_remap(src: np.ndarray, map_r: np.ndarray, map_c: np.ndarray) -> np
     Returns (H', W', 3) uint8.
     """
     H, W = src.shape[:2]
+    # Clamp coordinates first so fractional parts stay in [0, 1).
+    map_r = np.clip(map_r, 0, H - 1)
+    map_c = np.clip(map_c, 0, W - 1)
     r0 = np.floor(map_r).astype(int).clip(0, H - 2)
     c0 = np.floor(map_c).astype(int).clip(0, W - 2)
     r1 = r0 + 1
@@ -275,11 +278,13 @@ def _compute_shifts(
     edge_a: np.ndarray,
     edge_b: np.ndarray,
     radius: int,
+    scale: float = 1.0,
 ) -> np.ndarray:
     """Per-row vertical shifts that align edge_a to edge_b.
 
     For each row r, find integer shift s in [-radius, +radius] that minimises
-    mean(|edge_a[r] - edge_b[clamp(r+s)]|).  Returns smoothed float shifts.
+    mean(|edge_a[r] - edge_b[clamp(r+s)]|).  Returns smoothed float shifts
+    multiplied by scale (use scale > 1 to amplify the warp effect).
 
     edge_a, edge_b: (N, 3) float arrays — one edge column/row each.
     """
@@ -293,7 +298,7 @@ def _compute_shifts(
             if err < best_err:
                 best_s, best_err = s, err
         raw[r] = best_s
-    return _gaussian_smooth_1d(raw, sigma=8.0)
+    return _gaussian_smooth_1d(raw, sigma=8.0) * scale
 
 
 def _warp_vertical(
@@ -305,6 +310,7 @@ def _warp_vertical(
     overlap: int,
     warp_depth: int,
     warp_radius: int,
+    warp_scale: float = 1.0,
 ) -> None:
     """Geometric warp at a left-right tile boundary.
 
@@ -318,6 +324,7 @@ def _warp_vertical(
         left_arr[:, -1].astype(np.float32),
         right_arr[:, 0].astype(np.float32),
         warp_radius,
+        scale=warp_scale,
     )  # (H,) — positive = right tile needs to move up to match left
 
     half = shifts / 2.0
@@ -363,6 +370,7 @@ def _warp_horizontal(
     overlap: int,
     warp_depth: int,
     warp_radius: int,
+    warp_scale: float = 1.0,
 ) -> None:
     """Geometric warp at a top-bottom tile boundary.
 
@@ -373,6 +381,7 @@ def _warp_horizontal(
         top_arr[-1, :].astype(np.float32),
         bottom_arr[0, :].astype(np.float32),
         warp_radius,
+        scale=warp_scale,
     )  # (W,)
 
     half = shifts / 2.0
@@ -424,6 +433,7 @@ def assemble_output(
     warp: bool = False,
     warp_depth: int = 80,
     warp_radius: int = 30,
+    warp_scale: float = 1.0,
 ) -> Image.Image:
     """Greedily assemble one 3×3 output, then apply boundary effects.
 
@@ -525,6 +535,7 @@ def assemble_output(
                     overlap=overlap,
                     warp_depth=warp_depth,
                     warp_radius=warp_radius,
+                    warp_scale=warp_scale,
                 )
         for row_seam in range(1, 3):
             y_boundary = (row_seam - 1) * step + quad_size
@@ -539,6 +550,7 @@ def assemble_output(
                     overlap=overlap,
                     warp_depth=warp_depth,
                     warp_radius=warp_radius,
+                    warp_scale=warp_scale,
                 )
 
     return Image.fromarray(canvas_arr)
@@ -564,6 +576,8 @@ def main():
                         help="Pixels from boundary to warp inward (default: 80)")
     parser.add_argument("--warp-radius", type=int, default=30,
                         help="Per-row shift search radius in pixels (default: 30)")
+    parser.add_argument("--warp-scale", type=float, default=1.0,
+                        help="Multiply computed shifts by this factor to amplify warp (default: 1.0)")
     parser.add_argument("--no-post", action="store_true")
     args = parser.parse_args()
 
@@ -605,6 +619,7 @@ def main():
             warp=args.warp,
             warp_depth=args.warp_depth,
             warp_radius=args.warp_radius,
+            warp_scale=args.warp_scale,
         )
         dest = out_dir / f"frankenstein_output_{out_i + 1}.png"
         result.save(dest)
