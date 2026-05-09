@@ -235,6 +235,178 @@ def _quilt_horizontal(
     canvas[zone_y : zone_y + zone_height, canvas_x : canvas_x + W] = blended
 
 
+# ---------------------------------------------------------------------------
+# Geometric warp — per-row/column displacement field
+# ---------------------------------------------------------------------------
+
+def _gaussian_smooth_1d(arr: np.ndarray, sigma: float) -> np.ndarray:
+    """Convolve a 1-D float array with a Gaussian kernel (pure numpy)."""
+    radius = int(3 * sigma)
+    x = np.arange(-radius, radius + 1, dtype=np.float64)
+    kernel = np.exp(-0.5 * (x / sigma) ** 2)
+    kernel /= kernel.sum()
+    return np.convolve(arr.astype(np.float64), kernel, mode="same")
+
+
+def _bilinear_remap(src: np.ndarray, map_r: np.ndarray, map_c: np.ndarray) -> np.ndarray:
+    """Bilinear interpolation remap (pure numpy).
+
+    src:   (H, W, 3) uint8
+    map_r: (H', W') float — row coordinates in src space
+    map_c: (H', W') float — column coordinates in src space
+    Returns (H', W', 3) uint8.
+    """
+    H, W = src.shape[:2]
+    r0 = np.floor(map_r).astype(int).clip(0, H - 2)
+    c0 = np.floor(map_c).astype(int).clip(0, W - 2)
+    r1 = r0 + 1
+    c1 = c0 + 1
+    fr = (map_r - r0)[..., np.newaxis].astype(np.float32)
+    fc = (map_c - c0)[..., np.newaxis].astype(np.float32)
+    return (
+        (1 - fr) * (1 - fc) * src[r0, c0]
+        + (1 - fr) * fc      * src[r0, c1]
+        + fr       * (1 - fc) * src[r1, c0]
+        + fr       * fc      * src[r1, c1]
+    ).clip(0, 255).astype(np.uint8)
+
+
+def _compute_shifts(
+    edge_a: np.ndarray,
+    edge_b: np.ndarray,
+    radius: int,
+) -> np.ndarray:
+    """Per-row vertical shifts that align edge_a to edge_b.
+
+    For each row r, find integer shift s in [-radius, +radius] that minimises
+    mean(|edge_a[r] - edge_b[clamp(r+s)]|).  Returns smoothed float shifts.
+
+    edge_a, edge_b: (N, 3) float arrays — one edge column/row each.
+    """
+    N = len(edge_a)
+    raw = np.zeros(N, dtype=np.float64)
+    for r in range(N):
+        best_s, best_err = 0, float("inf")
+        for s in range(-radius, radius + 1):
+            r2 = max(0, min(N - 1, r + s))
+            err = float(np.mean(np.abs(edge_a[r] - edge_b[r2])))
+            if err < best_err:
+                best_s, best_err = s, err
+        raw[r] = best_s
+    return _gaussian_smooth_1d(raw, sigma=8.0)
+
+
+def _warp_vertical(
+    canvas: np.ndarray,
+    left_arr: np.ndarray,
+    right_arr: np.ndarray,
+    canvas_y: int,
+    x_boundary: int,
+    overlap: int,
+    warp_depth: int,
+    warp_radius: int,
+) -> None:
+    """Geometric warp at a left-right tile boundary.
+
+    Both tiles bend toward each other by half the computed shift.  The left
+    tile's rightmost warp_depth columns and the right tile's leftmost
+    warp_depth columns are remapped so their content flows toward alignment
+    at the boundary edge.
+    """
+    H = left_arr.shape[0]
+    shifts = _compute_shifts(
+        left_arr[:, -1].astype(np.float32),
+        right_arr[:, 0].astype(np.float32),
+        warp_radius,
+    )  # (H,) — positive = right tile needs to move up to match left
+
+    half = shifts / 2.0
+
+    # ---- Warp left tile's right zone ----
+    # c=0: interior (no shift), c=warp_depth-1: boundary (full half shift)
+    depth_l = min(warp_depth, left_arr.shape[1])
+    c_idx = np.arange(depth_l, dtype=np.float32)
+    fade_l = c_idx / max(depth_l - 1, 1)           # (depth_l,) 0→1 toward boundary
+    dr_l = half[:, np.newaxis] * fade_l[np.newaxis, :]  # (H, depth_l)
+
+    map_r_l = np.arange(H, dtype=np.float32)[:, np.newaxis] + dr_l   # (H, depth_l)
+    map_c_l = (left_arr.shape[1] - depth_l + c_idx)[np.newaxis, :] * np.ones((H, 1))
+    warped_left_zone = _bilinear_remap(
+        left_arr, map_r_l, map_c_l.astype(np.float32)
+    )
+    canvas[canvas_y : canvas_y + H,
+           x_boundary - depth_l : x_boundary] = warped_left_zone
+
+    # ---- Warp right tile's left zone ----
+    # c=0: boundary (full half shift), c=warp_depth-1: interior (no shift)
+    depth_r = min(warp_depth, right_arr.shape[1])
+    c_idx_r = np.arange(depth_r, dtype=np.float32)
+    fade_r = (depth_r - 1 - c_idx_r) / max(depth_r - 1, 1)  # 1→0 away from boundary
+    dr_r = (-half[:, np.newaxis]) * fade_r[np.newaxis, :]     # (H, depth_r)
+
+    map_r_r = np.arange(H, dtype=np.float32)[:, np.newaxis] + dr_r
+    map_c_r = c_idx_r[np.newaxis, :] * np.ones((H, 1))
+    warped_right_zone = _bilinear_remap(
+        right_arr, map_r_r, map_c_r.astype(np.float32)
+    )
+    right_canvas_x = x_boundary - overlap
+    canvas[canvas_y : canvas_y + H,
+           right_canvas_x : right_canvas_x + depth_r] = warped_right_zone
+
+
+def _warp_horizontal(
+    canvas: np.ndarray,
+    top_arr: np.ndarray,
+    bottom_arr: np.ndarray,
+    canvas_x: int,
+    y_boundary: int,
+    overlap: int,
+    warp_depth: int,
+    warp_radius: int,
+) -> None:
+    """Geometric warp at a top-bottom tile boundary.
+
+    Transpose of _warp_vertical: shifts are per-column horizontal offsets.
+    """
+    W = top_arr.shape[1]
+    shifts = _compute_shifts(
+        top_arr[-1, :].astype(np.float32),
+        bottom_arr[0, :].astype(np.float32),
+        warp_radius,
+    )  # (W,)
+
+    half = shifts / 2.0
+
+    # ---- Warp top tile's bottom zone ----
+    depth_t = min(warp_depth, top_arr.shape[0])
+    r_idx = np.arange(depth_t, dtype=np.float32)
+    fade_t = r_idx / max(depth_t - 1, 1)            # 0→1 toward boundary
+    dc_t = half[np.newaxis, :] * fade_t[:, np.newaxis]  # (depth_t, W)
+
+    map_r_t = (top_arr.shape[0] - depth_t + r_idx)[:, np.newaxis] * np.ones((1, W))
+    map_c_t = np.arange(W, dtype=np.float32)[np.newaxis, :] + dc_t
+    warped_top_zone = _bilinear_remap(
+        top_arr, map_r_t.astype(np.float32), map_c_t.astype(np.float32)
+    )
+    canvas[y_boundary - depth_t : y_boundary,
+           canvas_x : canvas_x + W] = warped_top_zone
+
+    # ---- Warp bottom tile's top zone ----
+    depth_b = min(warp_depth, bottom_arr.shape[0])
+    r_idx_b = np.arange(depth_b, dtype=np.float32)
+    fade_b = (depth_b - 1 - r_idx_b) / max(depth_b - 1, 1)  # 1→0 away from boundary
+    dc_b = (-half[np.newaxis, :]) * fade_b[:, np.newaxis]    # (depth_b, W)
+
+    map_r_b = r_idx_b[:, np.newaxis] * np.ones((1, W))
+    map_c_b = np.arange(W, dtype=np.float32)[np.newaxis, :] + dc_b
+    warped_bottom_zone = _bilinear_remap(
+        bottom_arr, map_r_b.astype(np.float32), map_c_b.astype(np.float32)
+    )
+    bottom_canvas_y = y_boundary - overlap
+    canvas[bottom_canvas_y : bottom_canvas_y + depth_b,
+           canvas_x : canvas_x + W] = warped_bottom_zone
+
+
 def make_latin_square(n: int, rng: np.random.Generator) -> list[list[int]]:
     """Return an n×n Latin square with values 0..n-1, rows and columns shuffled."""
     base = [[(i + j) % n for j in range(n)] for i in range(n)]
@@ -248,16 +420,23 @@ def assemble_output(
     rng: np.random.Generator,
     quad_size: int,
     overlap: int,
+    quilt: bool = True,
+    warp: bool = False,
+    warp_depth: int = 80,
+    warp_radius: int = 30,
 ) -> Image.Image:
-    """Greedily assemble one 3×3 output, then apply image-quilting seams.
+    """Greedily assemble one 3×3 output, then apply boundary effects.
 
     Phase 1 — greedy placement: raster-order selection of the best (piece,
     transform) pair for each slot, scored by weighted edge continuity.
 
-    Phase 2 — quilting: tiles are placed with `overlap` pixels of spatial
-    overlap at each internal boundary. Minimum-cost seam cutting then
-    repaints each overlap zone so the boundary follows natural image edges
-    rather than a hard grid line.
+    Phase 2a (if quilt=True) — image quilting: minimum-cost seam cutting
+    repaints each bidirectional overlap zone so the boundary follows natural
+    image edges rather than a hard grid line.
+
+    Phase 2b (if warp=True) — geometric warp: a per-row/column displacement
+    field bends each tile's content toward its neighbor at the boundary.
+    Both tiles warp toward each other by half the computed shift.
     """
     step = quad_size - overlap                      # pixels between tile origins
     canvas_size = quad_size + 2 * step              # = 3*quad_size - 2*overlap
@@ -298,40 +477,69 @@ def assemble_output(
         grid[row][col] = best_arr
         canvas.paste(best_img, (col * step, row * step))
 
-    # ------------------------------------------------------------------
-    # Phase 2: image quilting — recomposite overlap zones with seam cuts
-    # ------------------------------------------------------------------
     canvas_arr = np.array(canvas)
 
-    # Vertical seams (between adjacent columns within each tile row)
-    for tile_row in range(3):
-        canvas_y = tile_row * step
-        for col_seam in range(1, 3):
-            # Left tile ends at: (col_seam-1)*step + quad_size
-            x_boundary = (col_seam - 1) * step + quad_size
-            _quilt_vertical(
-                canvas_arr,
-                grid[tile_row][col_seam - 1],
-                grid[tile_row][col_seam],
-                canvas_y=canvas_y,
-                x_boundary=x_boundary,
-                overlap=overlap,
-            )
+    # ------------------------------------------------------------------
+    # Phase 2a: image quilting — recomposite overlap zones with seam cuts
+    # ------------------------------------------------------------------
+    if quilt:
+        for tile_row in range(3):
+            canvas_y = tile_row * step
+            for col_seam in range(1, 3):
+                x_boundary = (col_seam - 1) * step + quad_size
+                _quilt_vertical(
+                    canvas_arr,
+                    grid[tile_row][col_seam - 1],
+                    grid[tile_row][col_seam],
+                    canvas_y=canvas_y,
+                    x_boundary=x_boundary,
+                    overlap=overlap,
+                )
+        for row_seam in range(1, 3):
+            y_boundary = (row_seam - 1) * step + quad_size
+            for tile_col in range(3):
+                canvas_x = tile_col * step
+                _quilt_horizontal(
+                    canvas_arr,
+                    grid[row_seam - 1][tile_col],
+                    grid[row_seam][tile_col],
+                    canvas_x=canvas_x,
+                    y_boundary=y_boundary,
+                    overlap=overlap,
+                )
 
-    # Horizontal seams (between adjacent rows within each tile column)
-    for row_seam in range(1, 3):
-        # Top tile ends at: (row_seam-1)*step + quad_size
-        y_boundary = (row_seam - 1) * step + quad_size
-        for tile_col in range(3):
-            canvas_x = tile_col * step
-            _quilt_horizontal(
-                canvas_arr,
-                grid[row_seam - 1][tile_col],
-                grid[row_seam][tile_col],
-                canvas_x=canvas_x,
-                y_boundary=y_boundary,
-                overlap=overlap,
-            )
+    # ------------------------------------------------------------------
+    # Phase 2b: geometric warp — bend tile content toward neighbour edges
+    # ------------------------------------------------------------------
+    if warp:
+        for tile_row in range(3):
+            canvas_y = tile_row * step
+            for col_seam in range(1, 3):
+                x_boundary = (col_seam - 1) * step + quad_size
+                _warp_vertical(
+                    canvas_arr,
+                    grid[tile_row][col_seam - 1],
+                    grid[tile_row][col_seam],
+                    canvas_y=canvas_y,
+                    x_boundary=x_boundary,
+                    overlap=overlap,
+                    warp_depth=warp_depth,
+                    warp_radius=warp_radius,
+                )
+        for row_seam in range(1, 3):
+            y_boundary = (row_seam - 1) * step + quad_size
+            for tile_col in range(3):
+                canvas_x = tile_col * step
+                _warp_horizontal(
+                    canvas_arr,
+                    grid[row_seam - 1][tile_col],
+                    grid[row_seam][tile_col],
+                    canvas_x=canvas_x,
+                    y_boundary=y_boundary,
+                    overlap=overlap,
+                    warp_depth=warp_depth,
+                    warp_radius=warp_radius,
+                )
 
     return Image.fromarray(canvas_arr)
 
@@ -348,6 +556,14 @@ def main():
     parser.add_argument("--overlap", type=int, default=OVERLAP,
                         help=f"Overlap pixels for image-quilting seams (default: {OVERLAP}). "
                              "Output canvas = 3*(size//3) - 2*overlap.")
+    parser.add_argument("--no-quilt", action="store_true",
+                        help="Skip image-quilting seam cuts (quilting is on by default)")
+    parser.add_argument("--warp", action="store_true",
+                        help="Apply geometric warp at tile boundaries (off by default)")
+    parser.add_argument("--warp-depth", type=int, default=80,
+                        help="Pixels from boundary to warp inward (default: 80)")
+    parser.add_argument("--warp-radius", type=int, default=30,
+                        help="Per-row shift search radius in pixels (default: 30)")
     parser.add_argument("--no-post", action="store_true")
     args = parser.parse_args()
 
@@ -383,7 +599,13 @@ def main():
             for src_j in range(9)
         ]
         logger.info(f"Assembling output {out_i + 1}/9...")
-        result = assemble_output(pieces, rng, quad_size, args.overlap)
+        result = assemble_output(
+            pieces, rng, quad_size, args.overlap,
+            quilt=not args.no_quilt,
+            warp=args.warp,
+            warp_depth=args.warp_depth,
+            warp_radius=args.warp_radius,
+        )
         dest = out_dir / f"frankenstein_output_{out_i + 1}.png"
         result.save(dest)
         logger.info(f"Saved {dest.name}")

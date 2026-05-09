@@ -12,6 +12,20 @@ on:
       size:
         description: 'Square pixel dimension to standardize source images to'
         default: '900'
+      quilt:
+        description: 'Apply image-quilting seam cuts'
+        type: boolean
+        default: true
+      warp:
+        description: 'Apply geometric warp at tile boundaries'
+        type: boolean
+        default: false
+      warp_depth:
+        description: 'Pixels from boundary to warp inward'
+        default: '80'
+      warp_radius:
+        description: 'Per-row shift search radius (pixels)'
+        default: '30'
 
 jobs:
   run:
@@ -33,4 +47,8 @@ jobs:
           python collage_frankenstein_bot.py \
             --source-channel "${{ inputs.source_channel }}" \
             --post-channel "${{ inputs.post_channel }}" \
-            --size "${{ inputs.size }}"
+            --size "${{ inputs.size }}" \
+            ${{ inputs.quilt == false && '--no-quilt' || '' }} \
+            ${{ inputs.warp && '--warp' || '' }} \
+            --warp-depth "${{ inputs.warp_depth }}" \
+            --warp-radius "${{ inputs.warp_radius }}"
