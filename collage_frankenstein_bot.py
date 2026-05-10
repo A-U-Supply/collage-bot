@@ -453,6 +453,12 @@ def apply_source_style(img: Image.Image, style: str) -> Image.Image:
     """
     if style == "color":
         return img
+    if style == "rgb":
+        # Quantize each channel to 0 or 255 at the 128 threshold — reduces every
+        # pixel to one of the 8 RGB cube corners (black, red, green, blue, cyan,
+        # magenta, yellow, white).
+        arr = np.array(img)
+        return Image.fromarray(np.where(arr > 127, 255, 0).astype(np.uint8))
     if style == "grayscale":
         return img.convert("L").convert("RGB")
     if style == "stencil":
@@ -1085,7 +1091,7 @@ def main():
     parser.add_argument("--warp-strip", type=int, default=20,
                         help="Width of border strip (px) used to match forms for shift computation (default: 20)")
     parser.add_argument("--style",
-                        choices=["color", "grayscale", "stencil", "sobel", "canny",
+                        choices=["color", "rgb", "grayscale", "stencil", "sobel", "canny",
                                  "invert", "posterize", "solarize"],
                         default="color",
                         help="Visual style applied to source images before slicing (default: color)")
