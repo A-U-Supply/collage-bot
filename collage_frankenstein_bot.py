@@ -460,7 +460,7 @@ def make_latin_square(n: int, rng: np.random.Generator) -> list[list[int]]:
 
 
 def assemble_output(
-    pieces: list[tuple[int, int, Image.Image]],
+    pieces: list[tuple[int, list[Image.Image]]],
     rng: np.random.Generator,
     quad_size: int,
     overlap: int,
@@ -507,16 +507,17 @@ def assemble_output(
         best_img = None
 
         for piece_list_idx in remaining:
-            tile = pieces[piece_list_idx][2]
-            for transpose, invert in TRANSFORMS:
-                candidate = apply_transform(tile, transpose, invert)
-                arr = np.array(candidate)
-                score = edge_score(arr, above_arr, left_arr)
-                if score < best_score:
-                    best_score = score
-                    best_piece_idx = piece_list_idx
-                    best_arr = arr
-                    best_img = candidate
+            _src_j, all_tiles = pieces[piece_list_idx]
+            for tile in all_tiles:
+                for transpose, invert in TRANSFORMS:
+                    candidate = apply_transform(tile, transpose, invert)
+                    arr = np.array(candidate)
+                    score = edge_score(arr, above_arr, left_arr)
+                    if score < best_score:
+                        best_score = score
+                        best_piece_idx = piece_list_idx
+                        best_arr = arr
+                        best_img = candidate
 
         remaining.remove(best_piece_idx)
         placed[slot] = best_arr
@@ -650,12 +651,10 @@ def main():
     quadrants = [slice_quadrants(img) for img in images]
     logger.info(f"Sliced into {len(quadrants) * 9} quadrants ({quad_size}×{quad_size} each)")
 
-    latin = make_latin_square(9, rng)
-
     output_paths = []
     for out_i in range(9):
         pieces = [
-            (src_j, latin[out_i][src_j], quadrants[src_j][latin[out_i][src_j]])
+            (src_j, quadrants[src_j])
             for src_j in range(9)
         ]
         logger.info(f"Assembling output {out_i + 1}/9...")
