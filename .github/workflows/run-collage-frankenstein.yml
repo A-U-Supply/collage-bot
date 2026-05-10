@@ -3,19 +3,36 @@ name: Run Collage Frankenstein Bot
 on:
   workflow_dispatch:
     inputs:
-      source_channel:
+      from_channel:
         description: 'Channel to fetch images from'
         default: 'image-gen'
-      post_channel:
+      to_channel:
         description: 'Channel to post results to'
         default: 'img-junkyard'
-      size:
+      resolution:
         description: 'Square pixel dimension to standardize source images to'
         default: '900'
-      quilt:
-        description: 'Apply image-quilting seam cuts'
-        type: boolean
-        default: true
+      style:
+        description: 'Visual style applied to source images before slicing'
+        type: choice
+        default: 'color'
+        options:
+          - color
+          - grayscale
+          - stencil
+          - sobel
+          - canny
+          - invert
+          - posterize
+          - solarize
+      seams:
+        description: 'Seam cutting mode at tile boundaries'
+        type: choice
+        default: 'edge'
+        options:
+          - edge
+          - smooth
+          - off
       warp:
         description: 'Apply geometric warp at tile boundaries'
         type: boolean
@@ -32,38 +49,39 @@ on:
       warp_strip:
         description: 'Border strip width (px) used to match forms for shift computation'
         default: '20'
-      stencil:
-        description: 'Convert source images to binary black & white before slicing'
-        type: boolean
-        default: false
-      anneal:
+      refine:
         description: 'Run simulated annealing after greedy placement to refine tile arrangement'
         type: boolean
         default: false
-      anneal_steps:
+      refine_steps:
         description: 'Number of SA swap attempts per output'
         default: '500'
-      morph:
+      animate:
         description: 'Generate an animated GIF alongside the 9 still outputs'
         type: boolean
         default: false
-      morph_mode:
+      animate_mode:
         description: 'dissolve: cross-fade outputs 1↔9; slide: tiles shift positions; both: one of each'
+        type: choice
         default: 'dissolve'
-      morph_frames:
+        options:
+          - dissolve
+          - slide
+          - both
+      animate_frames:
         description: 'Number of frames in each direction of the morph animation'
         default: '12'
-      morph_delay:
+      animate_speed:
         description: 'Milliseconds per frame in the morph GIF'
         default: '150'
-      seam_mode:
-        description: 'edge: contour-following seam (default); diff: min-difference seam'
-        default: 'edge'
-      mondrian:
-        description: 'Generate non-uniform Mondrian-partition collages instead of the 3×3 grid'
-        type: boolean
-        default: false
-      mondrian_regions:
+      layout:
+        description: 'Grid layout style'
+        type: choice
+        default: 'grid'
+        options:
+          - grid
+          - mondrian
+      regions:
         description: 'Number of regions in each Mondrian partition (1–9)'
         default: '9'
 
@@ -85,22 +103,21 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
         run: |
           python collage_frankenstein_bot.py \
-            --source-channel "${{ inputs.source_channel }}" \
-            --post-channel "${{ inputs.post_channel }}" \
-            --size "${{ inputs.size }}" \
-            ${{ inputs.quilt == false && '--no-quilt' || '' }} \
+            --source-channel "${{ inputs.from_channel }}" \
+            --post-channel "${{ inputs.to_channel }}" \
+            --size "${{ inputs.resolution }}" \
+            --style "${{ inputs.style }}" \
+            --seams "${{ inputs.seams }}" \
             ${{ inputs.warp && '--warp' || '' }} \
             --warp-depth "${{ inputs.warp_depth }}" \
             --warp-radius "${{ inputs.warp_radius }}" \
             --warp-scale "${{ inputs.warp_scale }}" \
             --warp-strip "${{ inputs.warp_strip }}" \
-            ${{ inputs.stencil && '--stencil' || '' }} \
-            ${{ inputs.anneal && '--anneal' || '' }} \
-            --anneal-steps "${{ inputs.anneal_steps }}" \
-            ${{ inputs.morph && '--morph' || '' }} \
-            --morph-mode "${{ inputs.morph_mode }}" \
-            --morph-frames "${{ inputs.morph_frames }}" \
-            --morph-delay "${{ inputs.morph_delay }}" \
-            --seam-mode "${{ inputs.seam_mode }}" \
-            ${{ inputs.mondrian && '--mondrian' || '' }} \
-            --mondrian-regions "${{ inputs.mondrian_regions }}"
+            ${{ inputs.refine && '--anneal' || '' }} \
+            --anneal-steps "${{ inputs.refine_steps }}" \
+            ${{ inputs.animate && '--morph' || '' }} \
+            --morph-mode "${{ inputs.animate_mode }}" \
+            --morph-frames "${{ inputs.animate_frames }}" \
+            --morph-delay "${{ inputs.animate_speed }}" \
+            ${{ inputs.layout == 'mondrian' && '--mondrian' || '' }} \
+            --mondrian-regions "${{ inputs.regions }}"

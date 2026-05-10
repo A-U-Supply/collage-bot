@@ -163,6 +163,7 @@ def _quilt_vertical(
     x_boundary: int,
     overlap: int,
     seam_mode: str = "diff",
+    canny_norm: tuple | None = None,
 ) -> None:
     """Recomposite the bidirectional vertical overlap zone between horizontally adjacent tiles.
 
@@ -188,12 +189,13 @@ def _quilt_vertical(
 
     if seam_mode == "edge":
         from scipy.ndimage import distance_transform_edt
-        # Run Canny on full tiles — avoids virtual-extension artefacts and
-        # gives hysteresis the full image context to keep weak boundary edges.
-        gray_l = left_arr.mean(axis=2).astype(np.float32)
-        gray_r = right_arr.mean(axis=2).astype(np.float32)
-        edges_l = _canny_edges(gray_l)
-        edges_r = _canny_edges(gray_r)
+        # Normalise channels to cross-tile mean/std before Canny so edge
+        # sensitivity is consistent across tiles of varying brightness/saturation.
+        # Then run Canny on all RGB channels and union the maps.
+        left_f  = _normalize_channels(left_arr.astype(np.float32),  *canny_norm) if canny_norm else left_arr.astype(np.float32)
+        right_f = _normalize_channels(right_arr.astype(np.float32), *canny_norm) if canny_norm else right_arr.astype(np.float32)
+        edges_l = _canny_edges(left_f)
+        edges_r = _canny_edges(right_f)
         # Map to zone: left tile's real region is its last `overlap` cols;
         # the virtual-extension half carries no edges.
         zone_edges = np.concatenate([
@@ -234,6 +236,7 @@ def _quilt_horizontal(
     y_boundary: int,
     overlap: int,
     seam_mode: str = "diff",
+    canny_norm: tuple | None = None,
 ) -> None:
     """Recomposite the bidirectional horizontal overlap zone between vertically adjacent tiles.
 
@@ -260,10 +263,10 @@ def _quilt_horizontal(
     # Transpose so the DP seam gives a row-cut value per column.
     if seam_mode == "edge":
         from scipy.ndimage import distance_transform_edt
-        gray_t = top_arr.mean(axis=2).astype(np.float32)
-        gray_b = bottom_arr.mean(axis=2).astype(np.float32)
-        edges_t = _canny_edges(gray_t)
-        edges_b = _canny_edges(gray_b)
+        top_f    = _normalize_channels(top_arr.astype(np.float32),    *canny_norm) if canny_norm else top_arr.astype(np.float32)
+        bottom_f = _normalize_channels(bottom_arr.astype(np.float32), *canny_norm) if canny_norm else bottom_arr.astype(np.float32)
+        edges_t = _canny_edges(top_f)
+        edges_b = _canny_edges(bottom_f)
         zone_edges = np.vstack([
             edges_t[-overlap:, :],
             np.zeros((overlap, W), dtype=bool),
@@ -345,12 +348,15 @@ def _grad_mag(strip: np.ndarray) -> np.ndarray:
 
 
 def _canny_edges(
-    gray: np.ndarray,
+    img: np.ndarray,
     sigma: float = 1.5,
     low: float = 0.05,
     high: float = 0.15,
 ) -> np.ndarray:
-    """Canny edge detector on a (H, W) float32 luminance array.
+    """Canny edge detector on a (H, W) float32 grayscale or (H, W, 3) RGB array.
+
+    For RGB input, runs per-channel and returns the union of all three edge maps
+    so colour edges invisible in luminance are captured.
 
     Pipeline: Gaussian blur → Sobel gradients → vectorised non-maximum
     suppression → double-threshold hysteresis.
@@ -359,6 +365,13 @@ def _canny_edges(
     sigma: Gaussian smoothing radius (suppresses texture noise).
     low/high: hysteresis thresholds as fractions of the peak gradient.
     """
+    if img.ndim == 3:
+        return (
+            _canny_edges(img[:, :, 0], sigma, low, high) |
+            _canny_edges(img[:, :, 1], sigma, low, high) |
+            _canny_edges(img[:, :, 2], sigma, low, high)
+        )
+    gray = img  # (H, W) float32
     from scipy import ndimage as ndi
 
     blurred = ndi.gaussian_filter(gray, sigma=sigma)
@@ -408,6 +421,59 @@ def _canny_edges(
     has_strong = np.zeros(n_labels + 1, dtype=bool)
     has_strong[labeled[strong]] = True
     return has_strong[labeled]
+
+
+def _normalize_channels(
+    arr: np.ndarray,
+    target_mean: np.ndarray,
+    target_std: np.ndarray,
+) -> np.ndarray:
+    """Per-channel linear normalisation toward a cross-tile mean/std.
+
+    arr: (H, W, 3) float32.  Returns (H, W, 3) float32 clipped to [0, 255].
+    Ensures all tiles are processed with consistent contrast before Canny so
+    edge sensitivity does not vary across bright or saturated source images.
+    """
+    result = np.empty_like(arr)
+    for c in range(3):
+        ch = arr[:, :, c]
+        cm, cs = float(ch.mean()), float(ch.std())
+        if cs < 1e-6:
+            result[:, :, c] = float(target_mean[c])
+        else:
+            result[:, :, c] = (ch - cm) / cs * float(target_std[c]) + float(target_mean[c])
+    return np.clip(result, 0.0, 255.0)
+
+
+def apply_source_style(img: Image.Image, style: str) -> Image.Image:
+    """Apply a visual style to a source image before slicing.
+
+    Applied before slice_quadrants so edge detection, seam placement, and
+    the final collage appearance all conform to the chosen style.
+    """
+    if style == "color":
+        return img
+    if style == "grayscale":
+        return img.convert("L").convert("RGB")
+    if style == "stencil":
+        return make_stencil(img).convert("RGB")
+    if style == "invert":
+        return ImageOps.invert(img)
+    if style == "posterize":
+        return ImageOps.posterize(img, 3)
+    if style == "solarize":
+        return ImageOps.solarize(img, threshold=128)
+    if style in ("sobel", "canny"):
+        from scipy import ndimage as ndi
+        arr = np.array(img.convert("L")).astype(np.float32)
+        if style == "sobel":
+            mag = np.hypot(ndi.sobel(arr, axis=1), ndi.sobel(arr, axis=0))
+            peak = mag.max()
+            out = (mag / peak * 255).clip(0, 255).astype(np.uint8) if peak > 0 else np.zeros_like(arr, dtype=np.uint8)
+        else:
+            out = (_canny_edges(arr).astype(np.uint8) * 255)
+        return Image.fromarray(out).convert("RGB")
+    return img
 
 
 def _ncc_rows(row_a: np.ndarray, row_b: np.ndarray) -> float:
@@ -712,6 +778,7 @@ def assemble_output(
     anneal_steps: int = 500,
     seam_mode: str = "diff",
     capture_tiles: bool = False,
+    canny_norm: tuple | None = None,
 ) -> tuple[Image.Image, dict[int, int], list | None]:
     """Greedily assemble one 3×3 output, then apply boundary effects.
 
@@ -845,6 +912,7 @@ def assemble_output(
                     x_boundary=x_boundary,
                     overlap=overlap,
                     seam_mode=seam_mode,
+                    canny_norm=canny_norm,
                 )
         for row_seam in range(1, 3):
             y_boundary = (row_seam - 1) * step + quad_size
@@ -858,6 +926,7 @@ def assemble_output(
                     y_boundary=y_boundary,
                     overlap=overlap,
                     seam_mode=seam_mode,
+                    canny_norm=canny_norm,
                 )
 
     # ------------------------------------------------------------------
@@ -999,8 +1068,8 @@ def main():
     parser.add_argument("--overlap", type=int, default=OVERLAP,
                         help=f"Overlap pixels for image-quilting seams (default: {OVERLAP}). "
                              "Output canvas = 3*(size//3) - 2*overlap.")
-    parser.add_argument("--no-quilt", action="store_true",
-                        help="Skip image-quilting seam cuts (quilting is on by default)")
+    parser.add_argument("--seams", choices=["edge", "smooth", "off"], default="edge",
+                        help="edge: seam follows object contours (default); smooth: minimum-difference seam; off: no quilting")
     parser.add_argument("--warp", action="store_true",
                         help="Apply geometric warp at tile boundaries (off by default)")
     parser.add_argument("--warp-depth", type=int, default=80,
@@ -1011,8 +1080,11 @@ def main():
                         help="Multiply computed shifts by this factor to amplify warp (default: 1.0)")
     parser.add_argument("--warp-strip", type=int, default=20,
                         help="Width of border strip (px) used to match forms for shift computation (default: 20)")
-    parser.add_argument("--stencil", action="store_true",
-                        help="Convert source images to binary black & white before slicing into quadrants")
+    parser.add_argument("--style",
+                        choices=["color", "grayscale", "stencil", "sobel", "canny",
+                                 "invert", "posterize", "solarize"],
+                        default="color",
+                        help="Visual style applied to source images before slicing (default: color)")
     parser.add_argument("--anneal", action="store_true",
                         help="Run simulated annealing after greedy placement to refine tile arrangement")
     parser.add_argument("--anneal-steps", type=int, default=500,
@@ -1025,11 +1097,6 @@ def main():
                         help="Number of frames per transition between each output (default: 12)")
     parser.add_argument("--morph-delay", type=int, default=150,
                         help="Milliseconds per frame in the morph GIF (default: 150)")
-    parser.add_argument(
-        "--seam-mode", choices=["diff", "edge"], default="edge",
-        help="edge: seam follows object contours in source imagery (default); "
-             "diff: minimum pixel-difference seam",
-    )
     parser.add_argument("--mondrian", action="store_true",
                         help="Generate non-uniform Mondrian-partition collages instead of the 3×3 grid")
     parser.add_argument("--mondrian-regions", type=int, default=9,
@@ -1057,12 +1124,19 @@ def main():
     images = [standardize(Image.open(p).convert("RGB"), args.size) for p in source_paths]
     logger.info(f"Standardized {len(images)} images to {args.size}×{args.size}")
 
-    if args.stencil:
-        images = [make_stencil(img).convert("RGB") for img in images]
-        logger.info("Applied stencil (binary black & white) to all source images")
+    if args.style != "color":
+        images = [apply_source_style(img, args.style) for img in images]
+        logger.info(f"Applied style '{args.style}' to all source images")
 
     quadrants = [slice_quadrants(img) for img in images]
     logger.info(f"Sliced into {len(quadrants) * 9} quadrants ({quad_size}×{quad_size} each)")
+
+    # Compute cross-tile mean/std from all 81 quadrants for normalised Canny.
+    all_arrs = np.stack([np.array(q) for qs in quadrants for q in qs]).astype(np.float32)
+    canny_norm = (all_arrs.mean(axis=(0, 1, 2)), all_arrs.std(axis=(0, 1, 2)))
+
+    quilt = args.seams != "off"
+    seam_mode = "diff" if args.seams == "smooth" else "edge"
 
     used_per_src: dict[int, set[int]] = {src_j: set() for src_j in range(9)}
     need_slide = args.morph and args.morph_mode in ("slide", "both")
@@ -1085,7 +1159,7 @@ def main():
         else:
             result, chosen_qis, captures = assemble_output(
                 pieces, rng, quad_size, args.overlap,
-                quilt=not args.no_quilt,
+                quilt=quilt,
                 warp=args.warp,
                 warp_depth=args.warp_depth,
                 warp_radius=args.warp_radius,
@@ -1093,8 +1167,9 @@ def main():
                 warp_strip=args.warp_strip,
                 anneal=args.anneal,
                 anneal_steps=args.anneal_steps,
-                seam_mode=args.seam_mode,
+                seam_mode=seam_mode,
                 capture_tiles=(need_slide and out_i == 0),
+                canny_norm=canny_norm,
             )
         for src_j, qi in chosen_qis.items():
             used_per_src[src_j].add(qi)
