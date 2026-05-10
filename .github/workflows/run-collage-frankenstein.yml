@@ -57,8 +57,8 @@ on:
         description: 'Milliseconds per frame in the morph GIF'
         default: '150'
       seam_mode:
-        description: 'diff: min-difference seam (default); edge: contour-following seam'
-        default: 'diff'
+        description: 'edge: contour-following seam (default); diff: min-difference seam'
+        default: 'edge'
       mondrian:
         description: 'Generate non-uniform Mondrian-partition collages instead of the 3×3 grid'
         type: boolean

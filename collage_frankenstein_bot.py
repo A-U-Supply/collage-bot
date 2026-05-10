@@ -934,9 +934,9 @@ def main():
     parser.add_argument("--morph-delay", type=int, default=150,
                         help="Milliseconds per frame in the morph GIF (default: 150)")
     parser.add_argument(
-        "--seam-mode", choices=["diff", "edge"], default="diff",
-        help="diff: minimum pixel-difference seam (default); "
-             "edge: seam follows object contours in source imagery",
+        "--seam-mode", choices=["diff", "edge"], default="edge",
+        help="edge: seam follows object contours in source imagery (default); "
+             "diff: minimum pixel-difference seam",
     )
     parser.add_argument("--mondrian", action="store_true",
                         help="Generate non-uniform Mondrian-partition collages instead of the 3×3 grid")
