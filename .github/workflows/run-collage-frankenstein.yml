@@ -43,6 +43,19 @@ on:
       anneal_steps:
         description: 'Number of SA swap attempts per output'
         default: '500'
+      morph:
+        description: 'Generate an animated GIF alongside the 9 still outputs'
+        type: boolean
+        default: false
+      morph_mode:
+        description: 'dissolve: cross-fade outputs 1↔9; slide: tiles shift positions; both: one of each'
+        default: 'dissolve'
+      morph_frames:
+        description: 'Number of frames in each direction of the morph animation'
+        default: '12'
+      morph_delay:
+        description: 'Milliseconds per frame in the morph GIF'
+        default: '80'
 
 jobs:
   run:
@@ -73,4 +86,8 @@ jobs:
             --warp-strip "${{ inputs.warp_strip }}" \
             ${{ inputs.stencil && '--stencil' || '' }} \
             ${{ inputs.anneal && '--anneal' || '' }} \
-            --anneal-steps "${{ inputs.anneal_steps }}"
+            --anneal-steps "${{ inputs.anneal_steps }}" \
+            ${{ inputs.morph && '--morph' || '' }} \
+            --morph-mode "${{ inputs.morph_mode }}" \
+            --morph-frames "${{ inputs.morph_frames }}" \
+            --morph-delay "${{ inputs.morph_delay }}"

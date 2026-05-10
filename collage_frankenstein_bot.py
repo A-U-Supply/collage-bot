@@ -471,6 +471,42 @@ def _total_edge_score(placed: list) -> float:
     return total
 
 
+def _make_dissolve_frames(
+    img_a: Image.Image,
+    img_b: Image.Image,
+    frames: int,
+) -> list[Image.Image]:
+    """Cross-fade from img_a → img_b → img_a (ping-pong), returning PIL frames."""
+    a = img_a.convert("RGB")
+    b = img_b.convert("RGB")
+    fwd = [Image.blend(a, b, i / (frames - 1)) for i in range(frames)]
+    return fwd + fwd[-2:0:-1]   # forward then reverse, no duplicate endpoints
+
+
+def _make_slide_frames(
+    tile_captures: list[tuple[Image.Image, int, int]],
+    canvas_size: int,
+    rng: np.random.Generator,
+    frames: int,
+) -> list[Image.Image]:
+    """Slide the 9 tiles from arrangement A to a shuffled arrangement B and back."""
+    tile_imgs = [img for img, _, _ in tile_captures]
+    pos_a = [(x, y) for _, x, y in tile_captures]
+    perm = rng.permutation(9).tolist()
+    pos_b = [pos_a[perm[i]] for i in range(9)]
+
+    def make_frame(t: float) -> Image.Image:
+        frame = Image.new("RGB", (canvas_size, canvas_size))
+        for img, (ax, ay), (bx, by) in zip(tile_imgs, pos_a, pos_b):
+            x = int(ax + (bx - ax) * t)
+            y = int(ay + (by - ay) * t)
+            frame.paste(img, (x, y))
+        return frame
+
+    fwd = [make_frame(i / (frames - 1)) for i in range(frames)]
+    return fwd + fwd[-2:0:-1]
+
+
 def assemble_output(
     pieces: list[tuple[int, list[tuple[int, Image.Image]]]],
     rng: np.random.Generator,
@@ -484,7 +520,8 @@ def assemble_output(
     warp_strip: int = 20,
     anneal: bool = False,
     anneal_steps: int = 500,
-) -> tuple[Image.Image, dict[int, int]]:
+    capture_tiles: bool = False,
+) -> tuple[Image.Image, dict[int, int], list | None]:
     """Greedily assemble one 3×3 output, then apply boundary effects.
 
     Phase 1 — greedy placement: raster-order selection of the best (piece,
@@ -511,6 +548,7 @@ def assemble_output(
     remaining = list(range(len(pieces)))
     rng.shuffle(remaining)
     chosen_qis: dict[int, int] = {}  # src_j -> quadrant index chosen this output
+    tile_captures: list[tuple[Image.Image, int, int]] = []  # (img, x, y) for morph
 
     # ------------------------------------------------------------------
     # Phase 1: greedy tile selection + placement
@@ -545,6 +583,8 @@ def assemble_output(
         grid[row][col] = best_arr
         canvas.paste(best_img, (col * step, row * step))
         chosen_qis[pieces[best_piece_idx][0]] = best_tile_qi
+        if capture_tiles:
+            tile_captures.append((best_img, col * step, row * step))
 
     # ------------------------------------------------------------------
     # Phase 1b (optional): simulated annealing refinement
@@ -664,7 +704,7 @@ def assemble_output(
                     warp_strip=warp_strip,
                 )
 
-    return Image.fromarray(canvas_arr), chosen_qis
+    return Image.fromarray(canvas_arr), chosen_qis, (tile_captures if capture_tiles else None)
 
 
 def main():
@@ -697,6 +737,14 @@ def main():
                         help="Run simulated annealing after greedy placement to refine tile arrangement")
     parser.add_argument("--anneal-steps", type=int, default=500,
                         help="Number of SA swap attempts per output (default: 500)")
+    parser.add_argument("--morph", action="store_true",
+                        help="Generate an animated GIF alongside the 9 still outputs")
+    parser.add_argument("--morph-mode", choices=["dissolve", "slide", "both"], default="dissolve",
+                        help="dissolve: cross-fade outputs 1↔9; slide: tiles shift to shuffled positions; both: generate one of each (default: dissolve)")
+    parser.add_argument("--morph-frames", type=int, default=12,
+                        help="Number of frames in each direction of the morph animation (default: 12)")
+    parser.add_argument("--morph-delay", type=int, default=80,
+                        help="Milliseconds per frame in the morph GIF (default: 80)")
     parser.add_argument("--no-post", action="store_true")
     args = parser.parse_args()
 
@@ -728,8 +776,12 @@ def main():
     logger.info(f"Sliced into {len(quadrants) * 9} quadrants ({quad_size}×{quad_size} each)")
 
     used_per_src: dict[int, set[int]] = {src_j: set() for src_j in range(9)}
+    need_slide = args.morph and args.morph_mode in ("slide", "both")
 
     output_paths = []
+    output_images: list[Image.Image] = []
+    first_tile_captures = None
+
     for out_i in range(9):
         pieces = [
             (src_j, [(qi, q) for qi, q in enumerate(quadrants[src_j])
@@ -737,7 +789,7 @@ def main():
             for src_j in range(9)
         ]
         logger.info(f"Assembling output {out_i + 1}/9...")
-        result, chosen_qis = assemble_output(
+        result, chosen_qis, captures = assemble_output(
             pieces, rng, quad_size, args.overlap,
             quilt=not args.no_quilt,
             warp=args.warp,
@@ -747,18 +799,47 @@ def main():
             warp_strip=args.warp_strip,
             anneal=args.anneal,
             anneal_steps=args.anneal_steps,
+            capture_tiles=(need_slide and out_i == 0),
         )
         for src_j, qi in chosen_qis.items():
             used_per_src[src_j].add(qi)
+        if captures is not None:
+            first_tile_captures = captures
         dest = out_dir / f"frankenstein_output_{out_i + 1}.png"
         result.save(dest)
         logger.info(f"Saved {dest.name}")
         output_paths.append(dest)
+        output_images.append(result)
+
+    # ------------------------------------------------------------------
+    # Morph GIF generation
+    # ------------------------------------------------------------------
+    morph_paths = []
+    if args.morph:
+        canvas_size = quad_size + 2 * (quad_size - args.overlap)
+        modes = ["dissolve", "slide"] if args.morph_mode == "both" else [args.morph_mode]
+        for mode in modes:
+            if mode == "dissolve":
+                frames = _make_dissolve_frames(output_images[0], output_images[-1], args.morph_frames)
+                path = out_dir / "frankenstein_morph_dissolve.gif"
+            else:
+                frames = _make_slide_frames(first_tile_captures, canvas_size, rng, args.morph_frames)
+                path = out_dir / "frankenstein_morph_slide.gif"
+            frames[0].save(
+                path, save_all=True, append_images=frames[1:],
+                loop=0, duration=args.morph_delay, optimize=False,
+            )
+            logger.info(f"Saved {path.name}")
+            morph_paths.append(path)
 
     if not args.no_post:
         post_collages(token, args.post_channel, output_paths,
                       bot_name="collage-frankenstein", threaded=False)
         logger.info(f"Posted {len(output_paths)} outputs to #{args.post_channel}")
+        if morph_paths:
+            post_collages(token, args.post_channel, morph_paths,
+                          bot_name="collage-frankenstein", threaded=False)
+            logger.info(f"Posted {len(morph_paths)} morph GIF(s) to #{args.post_channel}")
     else:
         logger.info(f"Saved to {out_dir} (--no-post)")
 
