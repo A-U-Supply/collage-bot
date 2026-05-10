@@ -56,6 +56,13 @@ on:
       morph_delay:
         description: 'Milliseconds per frame in the morph GIF'
         default: '150'
+      mondrian:
+        description: 'Generate non-uniform Mondrian-partition collages instead of the 3×3 grid'
+        type: boolean
+        default: false
+      mondrian_regions:
+        description: 'Number of regions in each Mondrian partition (1–9)'
+        default: '9'
 
 jobs:
   run:
@@ -90,4 +97,6 @@ jobs:
             ${{ inputs.morph && '--morph' || '' }} \
             --morph-mode "${{ inputs.morph_mode }}" \
             --morph-frames "${{ inputs.morph_frames }}" \
-            --morph-delay "${{ inputs.morph_delay }}"
+            --morph-delay "${{ inputs.morph_delay }}" \
+            ${{ inputs.mondrian && '--mondrian' || '' }} \
+            --mondrian-regions "${{ inputs.mondrian_regions }}"

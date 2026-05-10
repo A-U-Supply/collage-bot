@@ -459,6 +459,58 @@ def make_latin_square(n: int, rng: np.random.Generator) -> list[list[int]]:
     return [[base[r][c] for c in col_order] for r in row_order]
 
 
+def _mondrian_partition(
+    canvas_size: int,
+    n_regions: int,
+    rng: np.random.Generator,
+    min_dim: int = 80,
+) -> list[tuple[int, int, int, int]]:
+    """Recursively split a square canvas into n_regions non-overlapping rectangles.
+
+    Always splits the largest splittable region along its longest axis at a
+    random point in [25 %, 75 %] of that dimension.  Each resulting piece is
+    at least min_dim pixels in each direction.
+
+    Returns a list of (x, y, width, height) tuples.
+    """
+    regions: list[tuple[int, int, int, int]] = [(0, 0, canvas_size, canvas_size)]
+
+    while len(regions) < n_regions:
+        candidates = [
+            (i, r) for i, r in enumerate(regions)
+            if r[2] >= 2 * min_dim or r[3] >= 2 * min_dim
+        ]
+        if not candidates:
+            break
+
+        # Pick the largest splittable region by area.
+        candidates.sort(key=lambda t: t[1][2] * t[1][3], reverse=True)
+        idx, (rx, ry, rw, rh) = candidates[0]
+
+        # Prefer to cut the longer axis; fall back to the other if too narrow.
+        can_h = rw >= 2 * min_dim  # vertical cut through width
+        can_v = rh >= 2 * min_dim  # horizontal cut through height
+        cut_width = can_h and (not can_v or rw >= rh)
+
+        if cut_width:
+            lo = max(min_dim, int(rw * 0.25))
+            hi = min(rw - min_dim, int(rw * 0.75))
+            cut = int(rng.integers(lo, hi + 1))
+            a = (rx,       ry, cut,      rh)
+            b = (rx + cut, ry, rw - cut, rh)
+        else:
+            lo = max(min_dim, int(rh * 0.25))
+            hi = min(rh - min_dim, int(rh * 0.75))
+            cut = int(rng.integers(lo, hi + 1))
+            a = (rx, ry,       rw, cut)
+            b = (rx, ry + cut, rw, rh - cut)
+
+        regions.pop(idx)
+        regions.extend([a, b])
+
+    return regions
+
+
 def _total_edge_score(placed: list) -> float:
     """Sum edge_score across all 9 slots given already-placed neighbours."""
     total = 0.0
@@ -723,6 +775,93 @@ def assemble_output(
     return Image.fromarray(canvas_arr), chosen_qis, (tile_captures if capture_tiles else None)
 
 
+def assemble_mondrian(
+    pieces: list[tuple[int, list[tuple[int, Image.Image]]]],
+    rng: np.random.Generator,
+    canvas_size: int,
+    n_regions: int,
+) -> tuple[Image.Image, dict[int, int]]:
+    """Assemble one non-uniform Mondrian-partition collage.
+
+    Partitions canvas_size × canvas_size into n_regions rectangles via
+    recursive binary splits, then greedily places one quadrant (from one
+    source image) per region — scaled to fit — choosing the transform that
+    best continues edges with already-placed neighbours.
+
+    Neighbours are read from the already-painted canvas so regions of
+    differing sizes are handled naturally without resizing either array.
+
+    Returns (output_image, chosen_qis) where chosen_qis maps src_j → qi.
+    """
+    n_regions = max(1, min(n_regions, len(pieces)))
+    regions = _mondrian_partition(canvas_size, n_regions, rng)
+    regions.sort(key=lambda r: (r[1], r[0]))  # raster order: top then left
+
+    canvas_arr = np.zeros((canvas_size, canvas_size, 3), dtype=np.uint8)
+    remaining = list(range(len(pieces)))
+    rng.shuffle(remaining)
+    chosen_qis: dict[int, int] = {}
+
+    depth = 8  # edge strip depth used for scoring
+
+    for rx, ry, rw, rh in regions:
+        # ------------------------------------------------------------------
+        # Read context strips from the already-painted canvas.
+        # ------------------------------------------------------------------
+        above_ctx: np.ndarray | None = None
+        left_ctx:  np.ndarray | None = None
+
+        if ry > 0:
+            row_start = max(0, ry - depth)
+            ctx = canvas_arr[row_start:ry, rx:rx + rw]   # (<= depth, rw, 3)
+            h_ctx = ctx.shape[0]
+            if h_ctx < depth:
+                ctx = np.vstack([
+                    np.zeros((depth - h_ctx, rw, 3), dtype=np.uint8),
+                    ctx,
+                ])
+            above_ctx = ctx  # (depth, rw, 3)
+
+        if rx > 0:
+            col_start = max(0, rx - depth)
+            ctx = canvas_arr[ry:ry + rh, col_start:rx]   # (rh, <= depth, 3)
+            w_ctx = ctx.shape[1]
+            if w_ctx < depth:
+                ctx = np.hstack([
+                    np.zeros((rh, depth - w_ctx, 3), dtype=np.uint8),
+                    ctx,
+                ])
+            left_ctx = ctx  # (rh, depth, 3)
+
+        # ------------------------------------------------------------------
+        # Greedy: pick best (piece × tile × transform) for this region.
+        # ------------------------------------------------------------------
+        best_score     = float("inf")
+        best_piece_idx = None
+        best_tile_qi   = None
+        best_arr       = None
+
+        for piece_list_idx in remaining:
+            _src_j, indexed_tiles = pieces[piece_list_idx]
+            for qi, tile in indexed_tiles:
+                resized = tile.resize((rw, rh), Image.LANCZOS)
+                for transpose, invert in TRANSFORMS:
+                    candidate = apply_transform(resized, transpose, invert)
+                    arr = np.array(candidate)
+                    score = edge_score(arr, above_ctx, left_ctx, depth=depth)
+                    if score < best_score:
+                        best_score     = score
+                        best_piece_idx = piece_list_idx
+                        best_tile_qi   = qi
+                        best_arr       = arr
+
+        remaining.remove(best_piece_idx)
+        canvas_arr[ry:ry + rh, rx:rx + rw] = best_arr
+        chosen_qis[pieces[best_piece_idx][0]] = best_tile_qi
+
+    return Image.fromarray(canvas_arr), chosen_qis
+
+
 def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
@@ -761,6 +900,10 @@ def main():
                         help="Number of frames per transition between each output (default: 12)")
     parser.add_argument("--morph-delay", type=int, default=150,
                         help="Milliseconds per frame in the morph GIF (default: 150)")
+    parser.add_argument("--mondrian", action="store_true",
+                        help="Generate non-uniform Mondrian-partition collages instead of the 3×3 grid")
+    parser.add_argument("--mondrian-regions", type=int, default=9,
+                        help="Number of regions in each Mondrian partition (1–9, default: 9)")
     parser.add_argument("--no-post", action="store_true")
     args = parser.parse_args()
 
@@ -805,18 +948,23 @@ def main():
             for src_j in range(9)
         ]
         logger.info(f"Assembling output {out_i + 1}/9...")
-        result, chosen_qis, captures = assemble_output(
-            pieces, rng, quad_size, args.overlap,
-            quilt=not args.no_quilt,
-            warp=args.warp,
-            warp_depth=args.warp_depth,
-            warp_radius=args.warp_radius,
-            warp_scale=args.warp_scale,
-            warp_strip=args.warp_strip,
-            anneal=args.anneal,
-            anneal_steps=args.anneal_steps,
-            capture_tiles=(need_slide and out_i == 0),
-        )
+        if args.mondrian:
+            n_regions = max(1, min(9, args.mondrian_regions))
+            result, chosen_qis = assemble_mondrian(pieces, rng, args.size, n_regions)
+            captures = None
+        else:
+            result, chosen_qis, captures = assemble_output(
+                pieces, rng, quad_size, args.overlap,
+                quilt=not args.no_quilt,
+                warp=args.warp,
+                warp_depth=args.warp_depth,
+                warp_radius=args.warp_radius,
+                warp_scale=args.warp_scale,
+                warp_strip=args.warp_strip,
+                anneal=args.anneal,
+                anneal_steps=args.anneal_steps,
+                capture_tiles=(need_slide and out_i == 0),
+            )
         for src_j, qi in chosen_qis.items():
             used_per_src[src_j].add(qi)
         if captures is not None:
@@ -835,6 +983,9 @@ def main():
         canvas_size = quad_size + 2 * (quad_size - args.overlap)
         modes = ["dissolve", "slide"] if args.morph_mode == "both" else [args.morph_mode]
         for mode in modes:
+            if mode == "slide" and first_tile_captures is None:
+                logger.warning("Slide morph is not available in Mondrian mode; skipping.")
+                continue
             if mode == "dissolve":
                 frames = _make_dissolve_frames(output_images, args.morph_frames)
                 path = out_dir / "frankenstein_morph_dissolve.gif"
