@@ -161,6 +161,7 @@ def _quilt_vertical(
     canvas_y: int,
     x_boundary: int,
     overlap: int,
+    seam_mode: str = "diff",
 ) -> None:
     """Recomposite the bidirectional vertical overlap zone between horizontally adjacent tiles.
 
@@ -184,7 +185,10 @@ def _quilt_vertical(
     # Right tile: real pixels covering the full zone
     right_zone = right_arr[:, :zone_width].astype(np.float32)                    # (H, 2*overlap, 3)
 
-    error = np.mean((left_zone - right_zone) ** 2, axis=2)                       # (H, 2*overlap)
+    if seam_mode == "edge":
+        error = _edge_seam_cost(left_zone, right_zone)                            # (H, 2*overlap)
+    else:
+        error = np.mean((left_zone - right_zone) ** 2, axis=2)                   # (H, 2*overlap)
     seam  = _min_cost_seam(error)                                                 # (H,) in [0, 2*overlap)
 
     col_idx  = np.arange(zone_width)[np.newaxis, :]   # (1, 2*overlap)
@@ -202,6 +206,7 @@ def _quilt_horizontal(
     canvas_x: int,
     y_boundary: int,
     overlap: int,
+    seam_mode: str = "diff",
 ) -> None:
     """Recomposite the bidirectional horizontal overlap zone between vertically adjacent tiles.
 
@@ -226,7 +231,10 @@ def _quilt_horizontal(
     bottom_zone = bottom_arr[:zone_height, :].astype(np.float32)                 # (2*overlap, W, 3)
 
     # Transpose so the DP seam gives a row-cut value per column.
-    error = np.mean((top_zone - bottom_zone) ** 2, axis=2).T                    # (W, 2*overlap)
+    if seam_mode == "edge":
+        error = _edge_seam_cost(top_zone, bottom_zone).T                         # (W, 2*overlap)
+    else:
+        error = np.mean((top_zone - bottom_zone) ** 2, axis=2).T                # (W, 2*overlap)
     seam  = _min_cost_seam(error)                                                # (W,) in [0, 2*overlap)
 
     row_idx  = np.arange(zone_height)[:, np.newaxis]  # (2*overlap, 1)
@@ -286,6 +294,28 @@ def _grad_mag(strip: np.ndarray) -> np.ndarray:
     dy = np.gradient(gray, axis=0)
     dx = np.gradient(gray, axis=1)
     return np.sqrt(dy ** 2 + dx ** 2)
+
+
+def _edge_seam_cost(zone_a: np.ndarray, zone_b: np.ndarray) -> np.ndarray:
+    """Seam cost biased toward high-gradient areas in either overlap zone.
+
+    The seam DP minimises cost, so we invert edge magnitude: high-edge
+    regions get low cost, making the seam thread through object contours
+    and appear to have been physically cut along content edges.
+
+    Falls back to normalised pixel-difference when the zone is flat
+    (no edges to follow).
+
+    zone_a, zone_b: (H, W, 3) float32 arrays.
+    Returns (H, W) float32 cost array.
+    """
+    mag_a = _grad_mag(zone_a)
+    mag_b = _grad_mag(zone_b)
+    combined = np.maximum(mag_a, mag_b)   # prefer either tile's edges
+    max_val = float(combined.max())
+    if max_val < 1e-6:
+        return np.mean((zone_a - zone_b) ** 2, axis=2)
+    return (max_val - combined) / max_val  # normalised: 0 = strong edge (preferred)
 
 
 def _ncc_rows(row_a: np.ndarray, row_b: np.ndarray) -> float:
@@ -588,6 +618,7 @@ def assemble_output(
     warp_strip: int = 20,
     anneal: bool = False,
     anneal_steps: int = 500,
+    seam_mode: str = "diff",
     capture_tiles: bool = False,
 ) -> tuple[Image.Image, dict[int, int], list | None]:
     """Greedily assemble one 3×3 output, then apply boundary effects.
@@ -721,6 +752,7 @@ def assemble_output(
                     canvas_y=canvas_y,
                     x_boundary=x_boundary,
                     overlap=overlap,
+                    seam_mode=seam_mode,
                 )
         for row_seam in range(1, 3):
             y_boundary = (row_seam - 1) * step + quad_size
@@ -733,6 +765,7 @@ def assemble_output(
                     canvas_x=canvas_x,
                     y_boundary=y_boundary,
                     overlap=overlap,
+                    seam_mode=seam_mode,
                 )
 
     # ------------------------------------------------------------------
@@ -900,6 +933,11 @@ def main():
                         help="Number of frames per transition between each output (default: 12)")
     parser.add_argument("--morph-delay", type=int, default=150,
                         help="Milliseconds per frame in the morph GIF (default: 150)")
+    parser.add_argument(
+        "--seam-mode", choices=["diff", "edge"], default="diff",
+        help="diff: minimum pixel-difference seam (default); "
+             "edge: seam follows object contours in source imagery",
+    )
     parser.add_argument("--mondrian", action="store_true",
                         help="Generate non-uniform Mondrian-partition collages instead of the 3×3 grid")
     parser.add_argument("--mondrian-regions", type=int, default=9,
@@ -963,6 +1001,7 @@ def main():
                 warp_strip=args.warp_strip,
                 anneal=args.anneal,
                 anneal_steps=args.anneal_steps,
+                seam_mode=args.seam_mode,
                 capture_tiles=(need_slide and out_i == 0),
             )
         for src_j, qi in chosen_qis.items():

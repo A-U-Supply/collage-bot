@@ -56,6 +56,9 @@ on:
       morph_delay:
         description: 'Milliseconds per frame in the morph GIF'
         default: '150'
+      seam_mode:
+        description: 'diff: min-difference seam (default); edge: contour-following seam'
+        default: 'diff'
       mondrian:
         description: 'Generate non-uniform Mondrian-partition collages instead of the 3×3 grid'
         type: boolean
@@ -98,5 +101,6 @@ jobs:
             --morph-mode "${{ inputs.morph_mode }}" \
             --morph-frames "${{ inputs.morph_frames }}" \
             --morph-delay "${{ inputs.morph_delay }}" \
+            --seam-mode "${{ inputs.seam_mode }}" \
             ${{ inputs.mondrian && '--mondrian' || '' }} \
             --mondrian-regions "${{ inputs.mondrian_regions }}"
