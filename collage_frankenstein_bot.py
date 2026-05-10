@@ -472,7 +472,7 @@ def _total_edge_score(placed: list) -> float:
 
 
 def assemble_output(
-    pieces: list[tuple[int, list[Image.Image]]],
+    pieces: list[tuple[int, list[tuple[int, Image.Image]]]],
     rng: np.random.Generator,
     quad_size: int,
     overlap: int,
@@ -484,7 +484,7 @@ def assemble_output(
     warp_strip: int = 20,
     anneal: bool = False,
     anneal_steps: int = 500,
-) -> Image.Image:
+) -> tuple[Image.Image, dict[int, int]]:
     """Greedily assemble one 3×3 output, then apply boundary effects.
 
     Phase 1 — greedy placement: raster-order selection of the best (piece,
@@ -510,6 +510,7 @@ def assemble_output(
     grid: list[list[np.ndarray | None]] = [[None] * 3 for _ in range(3)]
     remaining = list(range(len(pieces)))
     rng.shuffle(remaining)
+    chosen_qis: dict[int, int] = {}  # src_j -> quadrant index chosen this output
 
     # ------------------------------------------------------------------
     # Phase 1: greedy tile selection + placement
@@ -521,12 +522,13 @@ def assemble_output(
 
         best_score = float("inf")
         best_piece_idx = None
+        best_tile_qi = None
         best_arr = None
         best_img = None
 
         for piece_list_idx in remaining:
-            _src_j, all_tiles = pieces[piece_list_idx]
-            for tile in all_tiles:
+            _src_j, indexed_tiles = pieces[piece_list_idx]
+            for qi, tile in indexed_tiles:
                 for transpose, invert in TRANSFORMS:
                     candidate = apply_transform(tile, transpose, invert)
                     arr = np.array(candidate)
@@ -534,6 +536,7 @@ def assemble_output(
                     if score < best_score:
                         best_score = score
                         best_piece_idx = piece_list_idx
+                        best_tile_qi = qi
                         best_arr = arr
                         best_img = candidate
 
@@ -541,6 +544,7 @@ def assemble_output(
         placed[slot] = best_arr
         grid[row][col] = best_arr
         canvas.paste(best_img, (col * step, row * step))
+        chosen_qis[pieces[best_piece_idx][0]] = best_tile_qi
 
     # ------------------------------------------------------------------
     # Phase 1b (optional): simulated annealing refinement
@@ -660,7 +664,7 @@ def assemble_output(
                     warp_strip=warp_strip,
                 )
 
-    return Image.fromarray(canvas_arr)
+    return Image.fromarray(canvas_arr), chosen_qis
 
 
 def main():
@@ -723,14 +727,17 @@ def main():
     quadrants = [slice_quadrants(img) for img in images]
     logger.info(f"Sliced into {len(quadrants) * 9} quadrants ({quad_size}×{quad_size} each)")
 
+    used_per_src: dict[int, set[int]] = {src_j: set() for src_j in range(9)}
+
     output_paths = []
     for out_i in range(9):
         pieces = [
-            (src_j, quadrants[src_j])
+            (src_j, [(qi, q) for qi, q in enumerate(quadrants[src_j])
+                     if qi not in used_per_src[src_j]])
             for src_j in range(9)
         ]
         logger.info(f"Assembling output {out_i + 1}/9...")
-        result = assemble_output(
+        result, chosen_qis = assemble_output(
             pieces, rng, quad_size, args.overlap,
             quilt=not args.no_quilt,
             warp=args.warp,
@@ -741,6 +748,8 @@ def main():
             anneal=args.anneal,
             anneal_steps=args.anneal_steps,
         )
+        for src_j, qi in chosen_qis.items():
+            used_per_src[src_j].add(qi)
         dest = out_dir / f"frankenstein_output_{out_i + 1}.png"
         result.save(dest)
         logger.info(f"Saved {dest.name}")
