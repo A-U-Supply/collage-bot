@@ -1038,9 +1038,13 @@ def assemble_mondrian(
         for piece_list_idx in remaining:
             _src_j, indexed_tiles = pieces[piece_list_idx]
             for qi, tile in indexed_tiles:
-                resized = tile.resize((rw, rh), Image.LANCZOS)
                 for transpose, invert in TRANSFORMS:
-                    candidate = apply_transform(resized, transpose, invert)
+                    # Apply transform first (source tiles are square, so dims stay
+                    # the same), then resize to the region's (possibly non-square)
+                    # dimensions. Resizing before transform caused ROTATE_90 etc. to
+                    # swap width/height on non-square tiles, breaking edge_score.
+                    candidate = apply_transform(tile, transpose, invert)
+                    candidate = candidate.resize((rw, rh), Image.LANCZOS)
                     arr = np.array(candidate)
                     score = edge_score(arr, above_ctx, left_ctx, depth=depth)
                     if score < best_score:
