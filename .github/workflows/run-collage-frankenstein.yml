@@ -55,7 +55,7 @@ on:
         default: '12'
       morph_delay:
         description: 'Milliseconds per frame in the morph GIF'
-        default: '80'
+        default: '150'
 
 jobs:
   run:

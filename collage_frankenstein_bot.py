@@ -472,30 +472,40 @@ def _total_edge_score(placed: list) -> float:
 
 
 def _make_dissolve_frames(
-    img_a: Image.Image,
-    img_b: Image.Image,
-    frames: int,
+    images: list[Image.Image],
+    frames_per_transition: int,
 ) -> list[Image.Image]:
-    """Cross-fade from img_a → img_b → img_a (ping-pong), returning PIL frames."""
-    a = img_a.convert("RGB")
-    b = img_b.convert("RGB")
-    fwd = [Image.blend(a, b, i / (frames - 1)) for i in range(frames)]
-    return fwd + fwd[-2:0:-1]   # forward then reverse, no duplicate endpoints
+    """Cross-fade through all images in sequence, looping back to the first."""
+    result = []
+    n = len(images)
+    for i in range(n):
+        a = images[i].convert("RGB")
+        b = images[(i + 1) % n].convert("RGB")
+        # include start frame, exclude end frame (it becomes next start)
+        for f in range(frames_per_transition):
+            alpha = f / frames_per_transition
+            result.append(Image.blend(a, b, alpha))
+    return result
 
 
 def _make_slide_frames(
     tile_captures: list[tuple[Image.Image, int, int]],
     canvas_size: int,
     rng: np.random.Generator,
-    frames: int,
+    num_arrangements: int,
+    frames_per_transition: int,
 ) -> list[Image.Image]:
-    """Slide the 9 tiles from arrangement A to a shuffled arrangement B and back."""
+    """Slide through num_arrangements shuffled tile arrangements, looping."""
     tile_imgs = [img for img, _, _ in tile_captures]
-    pos_a = [(x, y) for _, x, y in tile_captures]
-    perm = rng.permutation(9).tolist()
-    pos_b = [pos_a[perm[i]] for i in range(9)]
+    base_pos = [(x, y) for _, x, y in tile_captures]
 
-    def make_frame(t: float) -> Image.Image:
+    # Generate num_arrangements distinct shuffled position lists
+    arrangements = [base_pos]
+    for _ in range(num_arrangements - 1):
+        perm = rng.permutation(9).tolist()
+        arrangements.append([base_pos[perm[i]] for i in range(9)])
+
+    def make_frame(pos_a, pos_b, t: float) -> Image.Image:
         frame = Image.new("RGB", (canvas_size, canvas_size))
         for img, (ax, ay), (bx, by) in zip(tile_imgs, pos_a, pos_b):
             x = int(ax + (bx - ax) * t)
@@ -503,8 +513,14 @@ def _make_slide_frames(
             frame.paste(img, (x, y))
         return frame
 
-    fwd = [make_frame(i / (frames - 1)) for i in range(frames)]
-    return fwd + fwd[-2:0:-1]
+    result = []
+    n = len(arrangements)
+    for i in range(n):
+        pos_a = arrangements[i]
+        pos_b = arrangements[(i + 1) % n]
+        for f in range(frames_per_transition):
+            result.append(make_frame(pos_a, pos_b, f / frames_per_transition))
+    return result
 
 
 def assemble_output(
@@ -742,9 +758,9 @@ def main():
     parser.add_argument("--morph-mode", choices=["dissolve", "slide", "both"], default="dissolve",
                         help="dissolve: cross-fade outputs 1↔9; slide: tiles shift to shuffled positions; both: generate one of each (default: dissolve)")
     parser.add_argument("--morph-frames", type=int, default=12,
-                        help="Number of frames in each direction of the morph animation (default: 12)")
-    parser.add_argument("--morph-delay", type=int, default=80,
-                        help="Milliseconds per frame in the morph GIF (default: 80)")
+                        help="Number of frames per transition between each output (default: 12)")
+    parser.add_argument("--morph-delay", type=int, default=150,
+                        help="Milliseconds per frame in the morph GIF (default: 150)")
     parser.add_argument("--no-post", action="store_true")
     args = parser.parse_args()
 
@@ -820,10 +836,14 @@ def main():
         modes = ["dissolve", "slide"] if args.morph_mode == "both" else [args.morph_mode]
         for mode in modes:
             if mode == "dissolve":
-                frames = _make_dissolve_frames(output_images[0], output_images[-1], args.morph_frames)
+                frames = _make_dissolve_frames(output_images, args.morph_frames)
                 path = out_dir / "frankenstein_morph_dissolve.gif"
             else:
-                frames = _make_slide_frames(first_tile_captures, canvas_size, rng, args.morph_frames)
+                frames = _make_slide_frames(
+                    first_tile_captures, canvas_size, rng,
+                    num_arrangements=len(output_images),
+                    frames_per_transition=args.morph_frames,
+                )
                 path = out_dir / "frankenstein_morph_slide.gif"
             frames[0].save(
                 path, save_all=True, append_images=frames[1:],
