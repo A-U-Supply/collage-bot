@@ -187,10 +187,36 @@ def _quilt_vertical(
     right_zone = right_arr[:, :zone_width].astype(np.float32)                    # (H, 2*overlap, 3)
 
     if seam_mode == "edge":
-        error = _edge_seam_cost(left_zone, right_zone)                            # (H, 2*overlap)
+        from scipy.ndimage import distance_transform_edt
+        # Run Canny on full tiles — avoids virtual-extension artefacts and
+        # gives hysteresis the full image context to keep weak boundary edges.
+        gray_l = left_arr.mean(axis=2).astype(np.float32)
+        gray_r = right_arr.mean(axis=2).astype(np.float32)
+        edges_l = _canny_edges(gray_l)
+        edges_r = _canny_edges(gray_r)
+        # Map to zone: left tile's real region is its last `overlap` cols;
+        # the virtual-extension half carries no edges.
+        zone_edges = np.concatenate([
+            edges_l[:, -overlap:],
+            np.zeros((H, overlap), dtype=bool),
+        ], axis=1) | edges_r[:, :zone_width]           # (H, zone_width)
+        if zone_edges.any():
+            cost = distance_transform_edt(~zone_edges).astype(np.float32)
+            cost /= cost.max()
+        else:
+            cost = np.mean((left_zone - right_zone) ** 2, axis=2)
+            peak = cost.max()
+            if peak > 1e-6:
+                cost /= peak
+        seam = _min_cost_seam(cost)
+        # Smooth the path to eliminate pixel-staircase artefacts.
+        seam = np.round(
+            _gaussian_smooth_1d(seam.astype(np.float64), sigma=12.0)
+        ).astype(int).clip(0, zone_width - 1)
     else:
-        error = np.mean((left_zone - right_zone) ** 2, axis=2)                   # (H, 2*overlap)
-    seam  = _min_cost_seam(error)                                                 # (H,) in [0, 2*overlap)
+        seam = _min_cost_seam(
+            np.mean((left_zone - right_zone) ** 2, axis=2)
+        )
 
     col_idx  = np.arange(zone_width)[np.newaxis, :]   # (1, 2*overlap)
     seam_col = seam[:, np.newaxis]                    # (H, 1)
@@ -233,10 +259,31 @@ def _quilt_horizontal(
 
     # Transpose so the DP seam gives a row-cut value per column.
     if seam_mode == "edge":
-        error = _edge_seam_cost(top_zone, bottom_zone).T                         # (W, 2*overlap)
+        from scipy.ndimage import distance_transform_edt
+        gray_t = top_arr.mean(axis=2).astype(np.float32)
+        gray_b = bottom_arr.mean(axis=2).astype(np.float32)
+        edges_t = _canny_edges(gray_t)
+        edges_b = _canny_edges(gray_b)
+        zone_edges = np.vstack([
+            edges_t[-overlap:, :],
+            np.zeros((overlap, W), dtype=bool),
+        ]) | edges_b[:zone_height, :]                  # (zone_height, W)
+        if zone_edges.any():
+            cost = distance_transform_edt(~zone_edges).astype(np.float32)
+            cost /= cost.max()
+        else:
+            cost = np.mean((top_zone - bottom_zone) ** 2, axis=2)
+            peak = cost.max()
+            if peak > 1e-6:
+                cost /= peak
+        seam = _min_cost_seam(cost.T)
+        seam = np.round(
+            _gaussian_smooth_1d(seam.astype(np.float64), sigma=12.0)
+        ).astype(int).clip(0, zone_height - 1)
     else:
-        error = np.mean((top_zone - bottom_zone) ** 2, axis=2).T                # (W, 2*overlap)
-    seam  = _min_cost_seam(error)                                                # (W,) in [0, 2*overlap)
+        seam = _min_cost_seam(
+            np.mean((top_zone - bottom_zone) ** 2, axis=2).T
+        )
 
     row_idx  = np.arange(zone_height)[:, np.newaxis]  # (2*overlap, 1)
     seam_row = seam[np.newaxis, :]                    # (1, W)
@@ -361,38 +408,6 @@ def _canny_edges(
     has_strong = np.zeros(n_labels + 1, dtype=bool)
     has_strong[labeled[strong]] = True
     return has_strong[labeled]
-
-
-def _edge_seam_cost(zone_a: np.ndarray, zone_b: np.ndarray) -> np.ndarray:
-    """Canny-guided seam cost map.
-
-    Detects edges in both overlap zones, combines them, then computes a
-    Euclidean distance transform so the seam DP is attracted toward the
-    nearest object contour from either tile — even if the seam path is
-    not exactly on an edge pixel.
-
-    Falls back to pixel-difference cost when no edges are detected.
-
-    zone_a, zone_b: (H, W, 3) float32 arrays.
-    Returns (H, W) float32 cost array, normalised to [0, 1].
-    """
-    from scipy.ndimage import distance_transform_edt
-
-    gray_a = zone_a.mean(axis=2).astype(np.float32)
-    gray_b = zone_b.mean(axis=2).astype(np.float32)
-
-    edges = _canny_edges(gray_a) | _canny_edges(gray_b)
-
-    if not edges.any():
-        # No edges found — fall back to normalised pixel difference.
-        diff = np.mean((zone_a - zone_b) ** 2, axis=2)
-        peak = diff.max()
-        return diff / peak if peak > 1e-6 else diff
-
-    # Distance from nearest Canny edge: 0 on edge, increases away from it.
-    dist = distance_transform_edt(~edges).astype(np.float32)
-    max_d = dist.max()
-    return dist / max_d if max_d > 1e-6 else dist
 
 
 def _ncc_rows(row_a: np.ndarray, row_b: np.ndarray) -> float:
