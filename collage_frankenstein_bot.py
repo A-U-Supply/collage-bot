@@ -38,7 +38,8 @@ from stencil_transform import make_stencil
 logger = logging.getLogger(__name__)
 
 # Pixels of overlap at each internal seam for image quilting.
-OVERLAP = 40
+# Wider overlap gives the seam more territory to find a meaningful edge.
+OVERLAP = 70
 
 # ---------------------------------------------------------------------------
 # Transformation catalogue: (transpose_mode_or_None, invert_colours)
@@ -287,8 +288,8 @@ def _bilinear_remap(src: np.ndarray, map_r: np.ndarray, map_c: np.ndarray) -> np
 def _grad_mag(strip: np.ndarray) -> np.ndarray:
     """Gradient magnitude of an (H, W, 3) strip → (H, W) float32.
 
-    Uses central differences on the luminance channel so that structural
-    edges and forms are captured independent of colour.
+    Used by the geometric warp code to match structural forms across tile
+    boundaries.  Uses central differences on the luminance channel.
     """
     gray = strip.mean(axis=2).astype(np.float32)        # (H, W)
     dy = np.gradient(gray, axis=0)
@@ -296,26 +297,102 @@ def _grad_mag(strip: np.ndarray) -> np.ndarray:
     return np.sqrt(dy ** 2 + dx ** 2)
 
 
+def _canny_edges(
+    gray: np.ndarray,
+    sigma: float = 1.5,
+    low: float = 0.05,
+    high: float = 0.15,
+) -> np.ndarray:
+    """Canny edge detector on a (H, W) float32 luminance array.
+
+    Pipeline: Gaussian blur → Sobel gradients → vectorised non-maximum
+    suppression → double-threshold hysteresis.
+
+    Returns a (H, W) bool array — True on edge pixels.
+    sigma: Gaussian smoothing radius (suppresses texture noise).
+    low/high: hysteresis thresholds as fractions of the peak gradient.
+    """
+    from scipy import ndimage as ndi
+
+    blurred = ndi.gaussian_filter(gray, sigma=sigma)
+    gx = ndi.sobel(blurred, axis=1).astype(np.float32)
+    gy = ndi.sobel(blurred, axis=0).astype(np.float32)
+    mag   = np.hypot(gx, gy)
+    angle = np.degrees(np.arctan2(gy, gx)) % 180
+
+    # ------------------------------------------------------------------
+    # Vectorised non-maximum suppression
+    # ------------------------------------------------------------------
+    H, W = mag.shape
+    mp = np.pad(mag, 1, mode="edge")
+    ri = np.arange(1, H + 1)[:, np.newaxis]
+    ci = np.arange(1, W + 1)[np.newaxis, :]
+
+    h_mask  = (angle < 22.5)  | (angle >= 157.5)           # ~horizontal
+    d1_mask = (angle >= 22.5) & (angle <  67.5)            # NE diagonal
+    v_mask  = (angle >= 67.5) & (angle < 112.5)            # ~vertical
+    # remaining: NW diagonal
+
+    n1 = np.where(h_mask,  mp[ri,   ci-1],
+         np.where(d1_mask, mp[ri-1, ci+1],
+         np.where(v_mask,  mp[ri-1, ci  ], mp[ri-1, ci-1])))
+    n2 = np.where(h_mask,  mp[ri,   ci+1],
+         np.where(d1_mask, mp[ri+1, ci-1],
+         np.where(v_mask,  mp[ri+1, ci  ], mp[ri+1, ci+1])))
+
+    sup = np.where((mag >= n1) & (mag >= n2), mag, 0.0)
+
+    # ------------------------------------------------------------------
+    # Double-threshold + hysteresis
+    # ------------------------------------------------------------------
+    peak = sup.max()
+    if peak < 1e-6:
+        return np.zeros((H, W), dtype=bool)
+
+    strong = sup >= high * peak
+    weak   = (sup >= low * peak) & ~strong
+
+    # Label connected components of (strong | weak); keep those that
+    # contain at least one strong pixel.
+    labeled, n_labels = ndi.label(strong | weak)
+    if n_labels == 0:
+        return strong
+
+    has_strong = np.zeros(n_labels + 1, dtype=bool)
+    has_strong[labeled[strong]] = True
+    return has_strong[labeled]
+
+
 def _edge_seam_cost(zone_a: np.ndarray, zone_b: np.ndarray) -> np.ndarray:
-    """Seam cost biased toward high-gradient areas in either overlap zone.
+    """Canny-guided seam cost map.
 
-    The seam DP minimises cost, so we invert edge magnitude: high-edge
-    regions get low cost, making the seam thread through object contours
-    and appear to have been physically cut along content edges.
+    Detects edges in both overlap zones, combines them, then computes a
+    Euclidean distance transform so the seam DP is attracted toward the
+    nearest object contour from either tile — even if the seam path is
+    not exactly on an edge pixel.
 
-    Falls back to normalised pixel-difference when the zone is flat
-    (no edges to follow).
+    Falls back to pixel-difference cost when no edges are detected.
 
     zone_a, zone_b: (H, W, 3) float32 arrays.
-    Returns (H, W) float32 cost array.
+    Returns (H, W) float32 cost array, normalised to [0, 1].
     """
-    mag_a = _grad_mag(zone_a)
-    mag_b = _grad_mag(zone_b)
-    combined = np.maximum(mag_a, mag_b)   # prefer either tile's edges
-    max_val = float(combined.max())
-    if max_val < 1e-6:
-        return np.mean((zone_a - zone_b) ** 2, axis=2)
-    return (max_val - combined) / max_val  # normalised: 0 = strong edge (preferred)
+    from scipy.ndimage import distance_transform_edt
+
+    gray_a = zone_a.mean(axis=2).astype(np.float32)
+    gray_b = zone_b.mean(axis=2).astype(np.float32)
+
+    edges = _canny_edges(gray_a) | _canny_edges(gray_b)
+
+    if not edges.any():
+        # No edges found — fall back to normalised pixel difference.
+        diff = np.mean((zone_a - zone_b) ** 2, axis=2)
+        peak = diff.max()
+        return diff / peak if peak > 1e-6 else diff
+
+    # Distance from nearest Canny edge: 0 on edge, increases away from it.
+    dist = distance_transform_edt(~edges).astype(np.float32)
+    max_d = dist.max()
+    return dist / max_d if max_d > 1e-6 else dist
 
 
 def _ncc_rows(row_a: np.ndarray, row_b: np.ndarray) -> float:
