@@ -36,6 +36,13 @@ on:
         description: 'Convert source images to binary black & white before slicing'
         type: boolean
         default: false
+      anneal:
+        description: 'Run simulated annealing after greedy placement to refine tile arrangement'
+        type: boolean
+        default: false
+      anneal_steps:
+        description: 'Number of SA swap attempts per output'
+        default: '500'
 
 jobs:
   run:
@@ -64,4 +71,6 @@ jobs:
             --warp-radius "${{ inputs.warp_radius }}" \
             --warp-scale "${{ inputs.warp_scale }}" \
             --warp-strip "${{ inputs.warp_strip }}" \
-            ${{ inputs.stencil && '--stencil' || '' }}
+            ${{ inputs.stencil && '--stencil' || '' }} \
+            ${{ inputs.anneal && '--anneal' || '' }} \
+            --anneal-steps "${{ inputs.anneal_steps }}"

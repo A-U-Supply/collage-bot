@@ -459,6 +459,18 @@ def make_latin_square(n: int, rng: np.random.Generator) -> list[list[int]]:
     return [[base[r][c] for c in col_order] for r in row_order]
 
 
+def _total_edge_score(placed: list) -> float:
+    """Sum edge_score across all 9 slots given already-placed neighbours."""
+    total = 0.0
+    for slot in range(9):
+        row, col = divmod(slot, 3)
+        above = placed[slot - 3] if row > 0 else None
+        left  = placed[slot - 1] if col > 0 else None
+        if above is not None or left is not None:
+            total += edge_score(placed[slot], above, left)
+    return total
+
+
 def assemble_output(
     pieces: list[tuple[int, list[Image.Image]]],
     rng: np.random.Generator,
@@ -470,11 +482,17 @@ def assemble_output(
     warp_radius: int = 30,
     warp_scale: float = 1.0,
     warp_strip: int = 20,
+    anneal: bool = False,
+    anneal_steps: int = 500,
 ) -> Image.Image:
     """Greedily assemble one 3×3 output, then apply boundary effects.
 
     Phase 1 — greedy placement: raster-order selection of the best (piece,
     transform) pair for each slot, scored by weighted edge continuity.
+
+    Phase 1b (if anneal=True) — simulated annealing: random tile swaps
+    accepted when they improve total seam score, or occasionally when they
+    don't, to escape local minima left by greedy placement.
 
     Phase 2a (if quilt=True) — image quilting: minimum-cost seam cutting
     repaints each bidirectional overlap zone so the boundary follows natural
@@ -523,6 +541,56 @@ def assemble_output(
         placed[slot] = best_arr
         grid[row][col] = best_arr
         canvas.paste(best_img, (col * step, row * step))
+
+    # ------------------------------------------------------------------
+    # Phase 1b (optional): simulated annealing refinement
+    # ------------------------------------------------------------------
+    if anneal:
+        current_score = _total_edge_score(placed)
+        T_start, T_end = 1.0, 0.01
+
+        def _best_transform_arr(arr, above, left):
+            """Return the best-transform version of arr for the given neighbours."""
+            best_s, best_a, best_i = float("inf"), arr, Image.fromarray(arr)
+            img = Image.fromarray(arr)
+            for transpose, invert in TRANSFORMS:
+                cand = apply_transform(img, transpose, invert)
+                a = np.array(cand)
+                s = edge_score(a, above, left)
+                if s < best_s:
+                    best_s, best_a, best_i = s, a, cand
+            return best_a, best_i
+
+        for sa_step in range(anneal_steps):
+            T = T_start * (T_end / T_start) ** (sa_step / max(anneal_steps - 1, 1))
+            i, j = rng.choice(9, size=2, replace=False).tolist()
+            row_i, col_i = divmod(i, 3)
+            row_j, col_j = divmod(j, 3)
+
+            new_arr_i, new_img_i = _best_transform_arr(
+                placed[j],
+                placed[i - 3] if row_i > 0 else None,
+                placed[i - 1] if col_i > 0 else None,
+            )
+            new_arr_j, new_img_j = _best_transform_arr(
+                placed[i],
+                placed[j - 3] if row_j > 0 else None,
+                placed[j - 1] if col_j > 0 else None,
+            )
+
+            old_i, old_j = placed[i], placed[j]
+            placed[i], placed[j] = new_arr_i, new_arr_j
+            new_score = _total_edge_score(placed)
+            delta = new_score - current_score
+
+            if delta < 0 or rng.random() < float(np.exp(-delta / T)):
+                current_score = new_score
+                grid[row_i][col_i] = new_arr_i
+                grid[row_j][col_j] = new_arr_j
+                canvas.paste(new_img_i, (col_i * step, row_i * step))
+                canvas.paste(new_img_j, (col_j * step, row_j * step))
+            else:
+                placed[i], placed[j] = old_i, old_j
 
     canvas_arr = np.array(canvas)
 
@@ -621,6 +689,10 @@ def main():
                         help="Width of border strip (px) used to match forms for shift computation (default: 20)")
     parser.add_argument("--stencil", action="store_true",
                         help="Convert source images to binary black & white before slicing into quadrants")
+    parser.add_argument("--anneal", action="store_true",
+                        help="Run simulated annealing after greedy placement to refine tile arrangement")
+    parser.add_argument("--anneal-steps", type=int, default=500,
+                        help="Number of SA swap attempts per output (default: 500)")
     parser.add_argument("--no-post", action="store_true")
     args = parser.parse_args()
 
@@ -666,6 +738,8 @@ def main():
             warp_radius=args.warp_radius,
             warp_scale=args.warp_scale,
             warp_strip=args.warp_strip,
+            anneal=args.anneal,
+            anneal_steps=args.anneal_steps,
         )
         dest = out_dir / f"frankenstein_output_{out_i + 1}.png"
         result.save(dest)
