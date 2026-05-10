@@ -454,11 +454,22 @@ def apply_source_style(img: Image.Image, style: str) -> Image.Image:
     if style == "color":
         return img
     if style == "rgb":
-        # Quantize each channel to 0 or 255 at the 128 threshold — reduces every
-        # pixel to one of the 8 RGB cube corners (black, red, green, blue, cyan,
-        # magenta, yellow, white).
-        arr = np.array(img)
-        return Image.fromarray(np.where(arr > 127, 255, 0).astype(np.uint8))
+        # Quantize every pixel to the nearest of 5 RYB palette entries:
+        # black, white, red, yellow, blue.
+        palette = np.array([
+            [  0,   0,   0],   # black
+            [255, 255, 255],   # white
+            [255,   0,   0],   # red
+            [255, 255,   0],   # yellow
+            [  0,   0, 255],   # blue
+        ], dtype=np.float32)
+        arr = np.array(img).astype(np.float32)          # (H, W, 3)
+        H, W = arr.shape[:2]
+        flat = arr.reshape(-1, 3)                       # (N, 3)
+        # Squared Euclidean distance to each palette colour
+        dists = ((flat[:, np.newaxis, :] - palette[np.newaxis, :, :]) ** 2).sum(axis=2)
+        indices = dists.argmin(axis=1)
+        return Image.fromarray(palette[indices].reshape(H, W, 3).astype(np.uint8))
     if style == "grayscale":
         return img.convert("L").convert("RGB")
     if style == "stencil":
