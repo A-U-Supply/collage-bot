@@ -1,0 +1,5 @@
+FROM python:3.11-slim
+WORKDIR /app
+RUN pip install --no-cache-dir Pillow numpy scipy
+COPY stencil_transform.py collage_frankenstein_bot.py collage_frankenstein_run.py ./
+ENTRYPOINT ["python", "/app/collage_frankenstein_run.py"]
