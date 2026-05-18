@@ -1,16 +1,17 @@
 """Figure/ground swap collage bot.
 
 Inspired by Clement Greenberg's essay on collage — figure/ground ambiguity
-and material juxtaposition as aesthetic statement. Fetches 4 images from a
+and material juxtaposition as aesthetic statement. Fetches 3 images from a
 Slack channel, isolates the foreground subject in each using binary
-segmentation, then cycles them: A's foreground on B's background, B's on C's,
-C's on D's, D's on A's. Hard binary mask edges, no feathering — the cut line
-is the aesthetic statement. Posts 4 outputs back to Slack.
+segmentation, then produces all 6 fg/bg permutations: every foreground
+on every other background. Hard binary mask edges, no feathering — the cut
+line is the aesthetic statement. Posts all 6 outputs as a single Slack message.
 """
 import argparse
 import logging
 import os
 import sys
+from itertools import permutations
 from pathlib import Path
 
 import cv2
@@ -102,8 +103,8 @@ def main():
     out_dir = args.output_dir / "output"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"Fetching 4 images from #{args.source_channel}...")
-    paths = fetch_random_images(token, args.source_channel, 4, source_dir)
+    logger.info(f"Fetching 3 images from #{args.source_channel}...")
+    paths = fetch_random_images(token, args.source_channel, 3, source_dir)
 
     imgs = [np.array(Image.open(p).convert("RGB")) for p in paths]
 
@@ -116,16 +117,15 @@ def main():
     logger.info(f"Segmenting with method: {args.seg_method}")
     masks = []
     for i, img in enumerate(imgs):
-        logger.info(f"  Segmenting image {i + 1}/4...")
+        logger.info(f"  Segmenting image {i + 1}/3...")
         masks.append(seg_fn(img))
 
-    # Cyclic rotation: fg from i, bg from (i+1) % 4
+    # All permutations: every fg on every other bg → 6 outputs
     output_paths = []
-    for i in range(4):
-        j = (i + 1) % 4
-        logger.info(f"  Compositing: image {i + 1} fg over image {j + 1} bg...")
-        out_img = composite_hard(imgs[i], imgs[j], masks[i])
-        out_path = out_dir / f"figure_ground_{i + 1}.jpg"
+    for fg_i, bg_i in permutations(range(3), 2):
+        logger.info(f"  Compositing: image {fg_i + 1} fg over image {bg_i + 1} bg...")
+        out_img = composite_hard(imgs[fg_i], imgs[bg_i], masks[fg_i])
+        out_path = out_dir / f"figure_ground_{fg_i + 1}_on_{bg_i + 1}.jpg"
         out_img.save(out_path, quality=92)
         logger.info(f"Saved {out_path.name}")
         output_paths.append(out_path)
@@ -136,7 +136,7 @@ def main():
             args.post_channel,
             output_paths,
             bot_name="figure-ground-swap",
-            threaded=True,
+            threaded=False,
         )
         logger.info(f"Posted {len(output_paths)} files to #{args.post_channel}")
     else:
